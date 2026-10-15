@@ -1,0 +1,44 @@
+name: Сборка APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Сборка
+        run: gradle :app:assembleRelease --stacktrace --no-daemon
+
+      - name: Переименование APK
+        run: cp app/build/outputs/apk/release/app-release.apk mark-x-obd-${{ github.run_number }}.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mark-x-obd-${{ github.run_number }}
+          path: mark-x-obd-${{ github.run_number }}.apk
+
+      - name: Публикация в Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Сборка ${{ github.run_number }}
+          body: "Автосборка из ${{ github.sha }}. Скачайте файл .apk ниже и установите на телефон."
+          files: mark-x-obd-${{ github.run_number }}.apk
+          make_latest: true

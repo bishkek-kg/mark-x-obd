@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Стрелочный указатель температуры -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- шкала -->
+    <path
+        android:pathData="M30,70 A26,26 0 1,1 78,70"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="6"
+        android:strokeLineCap="round" />
+    <!-- красная зона -->
+    <path
+        android:pathData="M73.5,46 A26,26 0 0,1 78,70"
+        android:strokeColor="#FFFF5A4E"
+        android:strokeWidth="6"
+        android:strokeLineCap="round" />
+    <!-- стрелка -->
+    <path
+        android:pathData="M54,62 L66,44"
+        android:strokeColor="#FFFFC94A"
+        android:strokeWidth="5"
+        android:strokeLineCap="round" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M54,62 m-5,0 a5,5 0 1,0 10,0 a5,5 0 1,0 -10,0" />
+</vector>

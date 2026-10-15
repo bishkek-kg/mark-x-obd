@@ -13,6 +13,12 @@
         android:usesPermissionFlags="neverForLocation"
         tools:targetApi="s" />
 
+    <!-- Работа в фоне -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
     <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
 
@@ -25,12 +31,18 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <service
+            android:name=".ObdService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

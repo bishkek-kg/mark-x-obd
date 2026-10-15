@@ -80,6 +80,16 @@ class Elm327(private val t: Transport, private val log: (String) -> Unit) {
         isCan = proto in setOf("6", "7", "8", "9")
     }
 
+    /** Повторная настройка после возможного сброса адаптера (просадка напряжения при запуске). */
+    suspend fun lightReinit() {
+        for (cmd in listOf("ATE0", "ATL0", "ATS0", "ATH0", "ATAT1")) {
+            try {
+                send(cmd, 1500)
+            } catch (_: ElmTimeoutException) {
+            }
+        }
+    }
+
     /** Номера поддерживаемых PID Mode 01. */
     suspend fun supportedPids(): Set<Int> {
         val set = HashSet<Int>()

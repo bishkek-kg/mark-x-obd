@@ -2,6 +2,7 @@ package kg.bishkek.markxobd
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.Application
 import android.bluetooth.BluetoothAdapter
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -27,6 +28,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.List
@@ -43,6 +45,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -73,7 +77,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
-import androidx.lifecycle.viewmodel.compose.viewModel
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -97,14 +100,15 @@ fun AppTheme(content: @Composable () -> Unit) {
 }
 
 private enum class Tab(val title: String) {
-    CONNECT("Связь"), DASH("Датчики"), CHARTS("Графики"), DTC("Ошибки"), LOGS("Записи")
+    CONNECT("Связь"), DASH("Датчики"), CHARTS("Графики"), TESTS("Тесты"), DTC("Ошибки"), LOGS("Записи")
 }
 
 // ---------------- Корень ----------------
 
 @Composable
-fun App(vm: ObdViewModel = viewModel()) {
+fun App() {
     val ctx = LocalContext.current
+    val vm = remember { ObdSession.get(ctx.applicationContext as Application) }
     val required = remember {
         if (Build.VERSION.SDK_INT >= 31) {
             arrayOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN)
@@ -115,12 +119,26 @@ fun App(vm: ObdViewModel = viewModel()) {
     var granted by remember {
         mutableStateOf(required.all { ContextCompat.checkSelfPermission(ctx, it) == PackageManager.PERMISSION_GRANTED })
     }
+    val notifLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
     val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { res ->
         granted = res.values.all { it }
-        if (granted) vm.refreshPaired()
+        if (granted) {
+            vm.refreshPaired()
+            vm.autoConnectOnStart()
+        }
     }
     LaunchedEffect(Unit) {
-        if (!granted) permLauncher.launch(required) else vm.refreshPaired()
+        if (!granted) {
+            permLauncher.launch(required)
+        } else {
+            vm.refreshPaired()
+            vm.autoConnectOnStart()
+        }
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
     }
 
     var tab by rememberSaveable { mutableStateOf(Tab.CONNECT) }
@@ -142,13 +160,14 @@ fun App(vm: ObdViewModel = viewModel()) {
                                     Tab.CONNECT -> Icons.Filled.Settings
                                     Tab.DASH -> Icons.Filled.Home
                                     Tab.CHARTS -> Icons.Filled.DateRange
+                                    Tab.TESTS -> Icons.Filled.Build
                                     Tab.DTC -> Icons.Filled.Warning
                                     Tab.LOGS -> Icons.Filled.List
                                 },
                                 contentDescription = t.title,
                             )
                         },
-                        label = { Text(t.title, fontSize = 11.sp) },
+                        label = { Text(t.title, fontSize = 10.sp, maxLines = 1) },
                     )
                 }
             }
@@ -169,6 +188,7 @@ fun App(vm: ObdViewModel = viewModel()) {
                 Tab.CONNECT -> ConnectScreen(vm)
                 Tab.DASH -> DashboardScreen(vm)
                 Tab.CHARTS -> ChartsScreen(vm)
+                Tab.TESTS -> TestsScreen(vm)
                 Tab.DTC -> DtcScreen(vm)
                 Tab.LOGS -> LogsScreen(vm)
             }
@@ -177,7 +197,7 @@ fun App(vm: ObdViewModel = viewModel()) {
 }
 
 @Composable
-private fun TopStatus(vm: ObdViewModel) {
+private fun TopStatus(vm: ObdSession) {
     val status by vm.status.collectAsState()
     val overheat by vm.overheat.collectAsState()
     val values by vm.values.collectAsState()
@@ -208,7 +228,7 @@ private fun TopStatus(vm: ObdViewModel) {
 
 @SuppressLint("MissingPermission")
 @Composable
-private fun ConnectScreen(vm: ObdViewModel) {
+private fun ConnectScreen(vm: ObdSession) {
     val connState by vm.connState.collectAsState()
     val paired by vm.pairedDevices.collectAsState()
     val ble by vm.bleDevices.collectAsState()
@@ -220,6 +240,8 @@ private fun ConnectScreen(vm: ObdViewModel) {
     }
     val btOn = vm.adapter?.isEnabled == true
     val last = vm.lastDevice
+    val autoReconnect by vm.autoReconnect.collectAsState()
+    val autoRecord by vm.autoRecord.collectAsState()
 
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (!btOn) {
@@ -240,17 +262,29 @@ private fun ConnectScreen(vm: ObdViewModel) {
         }
         item {
             when (connState) {
-                ConnState.CONNECTED, ConnState.CONNECTING -> Button(
+                ConnState.CONNECTED, ConnState.CONNECTING, ConnState.WAITING -> Button(
                     onClick = { vm.disconnect() },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text(if (connState == ConnState.CONNECTING) "Отменить подключение" else "Отключиться") }
+                ) { Text(if (connState == ConnState.CONNECTED) "Отключиться" else "Отменить подключение") }
 
                 ConnState.DISCONNECTED -> {
-                    if (last != null) {
+                    if (last != null && !vm.sessionActive) {
                         Button(onClick = { vm.connect(last) }, modifier = Modifier.fillMaxWidth()) {
                             Text("Подключиться к ${last.name}")
                         }
+                    }
+                }
+            }
+        }
+        item {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) {
+                    SwitchRow("Автоподключение", "При запуске приложения и при обрыве связи", autoReconnect) {
+                        vm.setAutoReconnect(it)
+                    }
+                    SwitchRow("Автозапись поездки", "Начинать запись сразу после подключения", autoRecord) {
+                        vm.setAutoRecord(it)
                     }
                 }
             }
@@ -299,6 +333,17 @@ private fun ConnectScreen(vm: ObdViewModel) {
 }
 
 @Composable
+private fun SwitchRow(title: String, hint: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title)
+            Text(hint, style = MaterialTheme.typography.bodySmall)
+        }
+        Switch(checked = checked, onCheckedChange = onChange)
+    }
+}
+
+@Composable
 private fun DeviceRow(d: DeviceItem, enabled: Boolean, onClick: () -> Unit) {
     Card(
         Modifier.fillMaxWidth().clickable(enabled = enabled, onClick = onClick),
@@ -316,7 +361,7 @@ private fun DeviceRow(d: DeviceItem, enabled: Boolean, onClick: () -> Unit) {
 // ---------------- Датчики ----------------
 
 @Composable
-private fun DashboardScreen(vm: ObdViewModel) {
+private fun DashboardScreen(vm: ObdSession) {
     val values by vm.values.collectAsState()
     val supported by vm.supportedKeys.collectAsState()
     val charts by vm.chartKeys.collectAsState()
@@ -387,7 +432,7 @@ private fun RecordButton(recording: Boolean, enabled: Boolean, onClick: () -> Un
 // ---------------- Графики ----------------
 
 @Composable
-private fun ChartsScreen(vm: ObdViewModel) {
+private fun ChartsScreen(vm: ObdSession) {
     val charts by vm.chartKeys.collectAsState()
     val tick by vm.historyTick.collectAsState()
     val values by vm.values.collectAsState()
@@ -472,6 +517,8 @@ fun LineChart(
     windowMin: Int,
     markers: List<Long>,
     dangerLevel: Float?,
+    leftLabel: String? = null,
+    rightLabel: String = "сейчас",
 ) {
     val lineColor = MaterialTheme.colorScheme.primary
     val gridColor = MaterialTheme.colorScheme.outlineVariant
@@ -541,16 +588,16 @@ fun LineChart(
         }
         drawPath(path, lineColor, style = Stroke(width = 2.dp.toPx()))
 
-        native.drawText("−$windowMin мин", left, size.height - 2f, paint)
+        native.drawText(leftLabel ?: "−$windowMin мин", left, size.height - 2f, paint)
         paint.textAlign = android.graphics.Paint.Align.RIGHT
-        native.drawText("сейчас", right, size.height - 2f, paint)
+        native.drawText(rightLabel, right, size.height - 2f, paint)
     }
 }
 
 // ---------------- Ошибки ----------------
 
 @Composable
-private fun DtcScreen(vm: ObdViewModel) {
+private fun DtcScreen(vm: ObdSession) {
     val result by vm.dtcResult.collectAsState()
     val freeze by vm.freezeFrame.collectAsState()
     val busy by vm.dtcBusy.collectAsState()
@@ -637,18 +684,19 @@ private fun DtcSection(title: String, codes: List<String>) {
 // ---------------- Записи ----------------
 
 @Composable
-private fun LogsScreen(vm: ObdViewModel) {
+private fun LogsScreen(vm: ObdSession) {
     val files by vm.logFiles.collectAsState()
     val rec by vm.recordingFile.collectAsState()
     val connState by vm.connState.collectAsState()
     val ctx = LocalContext.current
+    var expanded by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) { vm.refreshLogs() }
 
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "Записи поездок в CSV. Их можно отправить в Telegram или в чат с Claude для разбора.",
+                    "Записи поездок (CSV) и журналы исследований (TXT). Их можно отправить в Telegram или в чат с Claude для разбора.",
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.weight(1f),
                 )
@@ -657,18 +705,35 @@ private fun LogsScreen(vm: ObdViewModel) {
         }
         if (files.isEmpty()) item { Text("Записей пока нет") }
         items(files, key = { it.absolutePath }) { f ->
+            val isCsv = f.name.endsWith(".csv")
+            val recording = f == rec
+            val open = expanded == f.absolutePath
+            val summary = remember(f.absolutePath, f.lastModified(), open) {
+                if (open && isCsv) TripReport.fromCsv(f)?.text else null
+            }
             Card(Modifier.fillMaxWidth()) {
-                Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text(f.name, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                        Text(
-                            (if (f == rec) "идёт запись · " else "") + "${f.length() / 1024} КБ",
-                            style = MaterialTheme.typography.bodySmall,
-                        )
+                Column(Modifier.padding(12.dp)) {
+                    Text(f.name, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Text(
+                        (if (recording) "идёт запись · " else "") + "${f.length() / 1024} КБ",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Row {
+                        if (isCsv && !recording) {
+                            TextButton(onClick = { expanded = if (open) null else f.absolutePath }) {
+                                Text(if (open) "Скрыть сводку" else "Сводка")
+                            }
+                        }
+                        TextButton(onClick = {
+                            val text = if (isCsv && !recording) TripReport.fromCsv(f)?.text else null
+                            shareFile(ctx, f, text)
+                        }) { Text("Отправить") }
+                        if (!recording) {
+                            TextButton(onClick = { vm.deleteLog(f) }) { Text("Удалить") }
+                        }
                     }
-                    TextButton(onClick = { shareFile(ctx, f) }) { Text("Отправить") }
-                    if (f != rec) {
-                        TextButton(onClick = { vm.deleteLog(f) }) { Text("Удалить") }
+                    if (summary != null) {
+                        Text(summary, fontSize = 13.sp)
                     }
                 }
             }
@@ -676,15 +741,191 @@ private fun LogsScreen(vm: ObdViewModel) {
     }
 }
 
-private fun shareFile(ctx: android.content.Context, f: File) {
+private fun shareFile(ctx: android.content.Context, f: File, text: String?) {
     try {
         val uri = FileProvider.getUriForFile(ctx, ctx.packageName + ".files", f)
         val intent = Intent(Intent.ACTION_SEND).apply {
-            type = "text/csv"
+            type = if (f.name.endsWith(".csv")) "text/csv" else "text/plain"
             putExtra(Intent.EXTRA_STREAM, uri)
+            if (text != null) putExtra(Intent.EXTRA_TEXT, text)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        ctx.startActivity(Intent.createChooser(intent, "Отправить запись"))
+        ctx.startActivity(Intent.createChooser(intent, "Отправить"))
     } catch (_: Exception) {
+    }
+}
+
+// ---------------- Тесты ----------------
+
+@Composable
+private fun TestsScreen(vm: ObdSession) {
+    val connState by vm.connState.collectAsState()
+    val battery by vm.battery.collectAsState()
+    val warmup by vm.warmup.collectAsState()
+    val research by vm.research.collectAsState()
+    val researchBusy by vm.researchBusy.collectAsState()
+    val tick by vm.historyTick.collectAsState()
+    val ctx = LocalContext.current
+    val connected = connState == ConnState.CONNECTED
+    var cmd by rememberSaveable { mutableStateOf("") }
+    var showResearch by rememberSaveable { mutableStateOf(false) }
+
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        // ----- Аккумулятор -----
+        item {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(12.dp)) {
+                    Text("Тест аккумулятора при запуске", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Двигатель заглушён, зажигание включено. Нажмите «Начать» и в течение 30 секунд заводите двигатель.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Button(onClick = { vm.startBatteryTest() }, enabled = connected && battery?.running != true) {
+                        Text("Начать")
+                    }
+                    battery?.let { b ->
+                        Spacer(Modifier.height(8.dp))
+                        Text(b.phase, fontWeight = FontWeight.Medium)
+                        val parts = listOfNotNull(
+                            b.rest?.let { "покой ${String.format(Locale.US, "%.2f", it)} В" },
+                            b.min?.let { "минимум ${String.format(Locale.US, "%.2f", it)} В" },
+                            b.charging?.let { "зарядка ${String.format(Locale.US, "%.2f", it)} В" },
+                        )
+                        if (parts.isNotEmpty()) Text(parts.joinToString(" · "), fontSize = 14.sp)
+                        if (b.samples.size > 2) {
+                            LineChart(
+                                points = b.samples,
+                                startMs = b.samples.first().first,
+                                endMs = b.samples.last().first,
+                                windowMin = 0,
+                                markers = emptyList(),
+                                dangerLevel = null,
+                                leftLabel = "0 с",
+                                rightLabel = "${String.format(Locale.US, "%.0f", (b.samples.last().first - b.samples.first().first) / 1000.0)} с",
+                            )
+                        }
+                        b.verdict?.let {
+                            Spacer(Modifier.height(6.dp))
+                            Text(it, fontSize = 14.sp)
+                        }
+                    }
+                }
+            }
+        }
+        // ----- Прогрев -----
+        item {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(12.dp)) {
+                    Text("Тест прогрева на холостых", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Лучше начинать на холодном двигателе: заведите, нажмите «Начать» и не трогайте машину. " +
+                            "Кондиционер и печку выключите. Тест сам определит открытие термостата и включение вентиляторов, " +
+                            "запись поездки включится автоматически. При 105 °C тест остановится.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    val running = warmup?.running == true
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = { vm.startWarmupTest() }, enabled = connected && !running) { Text("Начать") }
+                        OutlinedButton(onClick = { vm.stopWarmupTest() }, enabled = running) { Text("Остановить") }
+                    }
+                    warmup?.let { w ->
+                        Spacer(Modifier.height(8.dp))
+                        val f0 = { v: Double -> String.format(Locale.US, "%.0f", v) }
+                        Text(
+                            "Прошло ${String.format(Locale.US, "%.1f", w.elapsedMin)} мин · сейчас ${w.current?.let(f0) ?: "?"} °C · " +
+                                "старт ${w.startTemp?.let(f0) ?: "?"} °C · макс ${w.max?.let(f0) ?: "?"} °C",
+                            fontSize = 14.sp,
+                        )
+                        Text(
+                            "Скорость роста: ${w.ratePerMin?.let { String.format(Locale.US, "%.1f", it) } ?: "—"} °C/мин",
+                            fontSize = 14.sp,
+                        )
+                        Text(
+                            "Термостат: " + (
+                                w.thermostatTemp?.let { "открылся ≈ при ${f0(it)} °C (на ${String.format(Locale.US, "%.1f", w.thermostatAtMin ?: 0.0)} мин)" }
+                                    ?: "ещё не открылся"
+                                ),
+                            fontSize = 14.sp,
+                        )
+                        Text(
+                            "Вентиляторы: " + if (w.fanTemps.isEmpty()) "не замечены" else w.fanTemps.joinToString { "${f0(it)} °C" },
+                            fontSize = 14.sp,
+                        )
+                        val end = if (tick == 0L) System.currentTimeMillis() else tick
+                        val pts = remember(tick) { vm.history.get("coolant", w.startTime) }
+                        if (pts.size > 2) {
+                            LineChart(
+                                points = pts,
+                                startMs = w.startTime,
+                                endMs = maxOf(end, w.startTime + 60_000),
+                                windowMin = 0,
+                                markers = emptyList(),
+                                dangerLevel = Pids.OVERHEAT_C.toFloat(),
+                                leftLabel = "старт",
+                            )
+                        }
+                        w.verdict?.let {
+                            Spacer(Modifier.height(6.dp))
+                            Text("Итог", fontWeight = FontWeight.Medium)
+                            Text(it, fontSize = 14.sp)
+                        }
+                    }
+                }
+            }
+        }
+        // ----- Исследование Toyota -----
+        item {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(12.dp)) {
+                    Text("Расширенные данные Toyota (эксперимент)", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Опрашивает блок двигателя запросами Toyota (Mode 21/22) и информацию о блоке. Только чтение — " +
+                            "команды записи и управления заблокированы. Результат сохраняется в файл, его можно прислать для расшифровки.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = {
+                            showResearch = true
+                            vm.scanToyota()
+                        }, enabled = connected && !researchBusy) { Text("Сканировать") }
+                        OutlinedButton(onClick = {
+                            vm.saveResearch()?.let { shareFile(ctx, it, null) }
+                        }, enabled = research.isNotEmpty() && !researchBusy) { Text("Отправить") }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(
+                            value = cmd,
+                            onValueChange = { cmd = it.uppercase(Locale.US) },
+                            label = { Text("Команда (напр. 0105, ATRV)") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Button(onClick = {
+                            showResearch = true
+                            vm.sendRaw(cmd)
+                        }, enabled = connected && !researchBusy && cmd.isNotBlank()) { Text("▶") }
+                    }
+                    if (researchBusy) Text("Обмен с блоком…", style = MaterialTheme.typography.bodySmall)
+                    if (research.isNotEmpty()) {
+                        Row {
+                            TextButton(onClick = { showResearch = !showResearch }) {
+                                Text(if (showResearch) "Скрыть ответы" else "Показать ответы (${research.size})")
+                            }
+                            TextButton(onClick = { vm.clearResearch() }) { Text("Очистить") }
+                        }
+                    }
+                }
+            }
+        }
+        if (showResearch) {
+            items(research.takeLast(120)) { line ->
+                Text(line, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+            }
+        }
     }
 }

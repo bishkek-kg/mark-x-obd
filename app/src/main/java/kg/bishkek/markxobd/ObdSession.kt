@@ -247,7 +247,7 @@ class ObdSession private constructor(private val app: Application) {
             elm = e
             connected = true
             connState.value = ConnState.CONNECTED
-            status.value = "Подключено: ${item.name} · ${t.kind} · ${e.version}"
+            status.value = "Подключено: ${item.name} · ${e.protocolName} · ${e.version}"
             if (autoRecord.value && logger == null) startRecording()
             pollLoop(e, active)
         } catch (c: CancellationException) {
@@ -686,7 +686,7 @@ class ObdSession private constructor(private val app: Application) {
     // ---------- Ошибки ----------
 
     fun readDtc() = dtcOp { e ->
-        val stored = e.readDtcs(0x03)
+        val stored = e.readStoredDtcs()
         val pending = e.readDtcs(0x07)
         val permanent = try {
             e.readDtcs(0x0A)

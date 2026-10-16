@@ -67,7 +67,7 @@ class ClassicTransport(private val device: BluetoothDevice) : Transport {
                 }
             }
         }
-        throw IOException("не удалось открыть Bluetooth-канал: ${last?.message}", last)
+        throw IOException("адаптер не принял Bluetooth-подключение — возможно, он занят другим приложением (Car Scanner) или выключено зажигание. ${last?.message ?: ""}".trim(), last)
     }
 
     private fun startReader(s: BluetoothSocket) {

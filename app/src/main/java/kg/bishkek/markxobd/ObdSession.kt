@@ -91,6 +91,8 @@ class ObdSession private constructor(private val app: Application) {
     @Volatile
     private var warmupAnalyzer: WarmupAnalyzer? = null
     private var autoConnectTried = false
+    @Volatile
+    private var lastError: String? = null
 
     init {
         refreshLogs()
@@ -206,10 +208,11 @@ class ObdSession private constructor(private val app: Application) {
                     val wait = minOf(30, 5 + attempt * 5)
                     connState.value = ConnState.WAITING
                     for (s in wait downTo 1) {
+                        val reason = lastError?.let { " ($it)" } ?: ""
                         status.value = if (wasConnected) {
-                            "Связь потеряна. Переподключение через $s с…"
+                            "Связь потеряна$reason. Переподключение через $s с…"
                         } else {
-                            "Адаптер не отвечает. Повтор через $s с… (попытка ${attempt + 1})"
+                            "Не удалось подключиться$reason. Повтор через $s с… (попытка ${attempt + 1})"
                         }
                         delay(1000)
                     }
@@ -226,6 +229,7 @@ class ObdSession private constructor(private val app: Application) {
     /** Одна сессия связи. Возвращает true, если удалось полностью подключиться. */
     private suspend fun runSession(item: DeviceItem): Boolean {
         var connected = false
+        lastError = null
         connState.value = ConnState.CONNECTING
         status.value = "Подключение к ${item.name}…"
         try {
@@ -249,7 +253,8 @@ class ObdSession private constructor(private val app: Application) {
         } catch (c: CancellationException) {
             throw c
         } catch (ex: Exception) {
-            if (!userDisconnect) status.value = "Ошибка: ${ex.message ?: ex.javaClass.simpleName}"
+            lastError = ex.message ?: ex.javaClass.simpleName
+            if (!userDisconnect) status.value = "Ошибка: $lastError"
             addConsole("! ${ex.message ?: ex}")
         } finally {
             elm = null

@@ -724,6 +724,11 @@ private fun LogsScreen(vm: ObdSession) {
                                 Text(if (open) "Скрыть сводку" else "Сводка")
                             }
                         }
+                        if (!recording) {
+                            TextButton(onClick = { saveToDownloads(ctx, f) }) { Text("Скачать") }
+                        }
+                    }
+                    Row {
                         TextButton(onClick = {
                             val text = if (isCsv && !recording) TripReport.fromCsv(f)?.text else null
                             shareFile(ctx, f, text)
@@ -739,6 +744,47 @@ private fun LogsScreen(vm: ObdSession) {
             }
         }
     }
+}
+
+/** Копирует файл в «Загрузки/MarkXOBD», чтобы его можно было прикрепить в любом приложении. */
+private fun saveToDownloads(ctx: android.content.Context, f: File) {
+    val ok = try {
+        if (Build.VERSION.SDK_INT >= 29) {
+            val values = android.content.ContentValues().apply {
+                put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, f.name)
+                put(
+                    android.provider.MediaStore.MediaColumns.MIME_TYPE,
+                    if (f.name.endsWith(".csv")) "text/csv" else "text/plain",
+                )
+                put(
+                    android.provider.MediaStore.MediaColumns.RELATIVE_PATH,
+                    android.os.Environment.DIRECTORY_DOWNLOADS + "/MarkXOBD",
+                )
+            }
+            val resolver = ctx.contentResolver
+            val uri = resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: throw java.io.IOException("не удалось создать файл")
+            resolver.openOutputStream(uri)?.use { out -> f.inputStream().use { it.copyTo(out) } }
+                ?: throw java.io.IOException("не удалось записать файл")
+            true
+        } else {
+            @Suppress("DEPRECATION")
+            val dir = File(
+                android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS),
+                "MarkXOBD",
+            )
+            dir.mkdirs()
+            f.copyTo(File(dir, f.name), overwrite = true)
+            true
+        }
+    } catch (_: Exception) {
+        false
+    }
+    android.widget.Toast.makeText(
+        ctx,
+        if (ok) "Сохранено в «Загрузки/MarkXOBD»" else "Не удалось сохранить файл",
+        android.widget.Toast.LENGTH_LONG,
+    ).show()
 }
 
 private fun shareFile(ctx: android.content.Context, f: File, text: String?) {

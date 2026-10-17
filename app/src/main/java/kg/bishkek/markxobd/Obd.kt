@@ -258,11 +258,11 @@ class CsvLogger(dir: File, private val keys: List<String>) {
         val name = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date())
         file = File(dir, "trip_$name.csv")
         writer = file.bufferedWriter()
-        writer.write("time,elapsed_s," + keys.joinToString(",") + ",fan_event\n")
+        writer.write("time,elapsed_s," + keys.joinToString(",") + ",fan_event,mark\n")
     }
 
     @Synchronized
-    fun write(now: Long, values: Map<String, Double>, fanEvent: Boolean) {
+    fun write(now: Long, values: Map<String, Double>, fanEvent: Boolean, mark: String? = null) {
         val sb = StringBuilder()
         sb.append(SimpleDateFormat("HH:mm:ss", Locale.US).format(Date(now)))
         sb.append(',').append(String.format(Locale.US, "%.1f", (now - start) / 1000.0))
@@ -271,6 +271,9 @@ class CsvLogger(dir: File, private val keys: List<String>) {
             values[k]?.let { sb.append(String.format(Locale.US, "%.3f", it)) }
         }
         sb.append(',').append(if (fanEvent) "1" else "")
+        sb.append(',')
+        // запятые и переводы строк в метке сломали бы CSV
+        mark?.let { sb.append(it.replace(',', ';').replace('\n', ' ').replace('\r', ' ')) }
         sb.append('\n')
         writer.write(sb.toString())
         if (++rows % 10 == 0) writer.flush()

@@ -83,10 +83,11 @@ data class WarmupState(
 /** Анализ прогрева на холостых: момент открытия термостата, вентиляторы, максимум. */
 class WarmupAnalyzer(private val startTime: Long, private val startTemp: Double?) {
     private val samples = ArrayList<Pair<Long, Double>>()
-    private var maxRate = 0.0
+    private val detector = ThermostatDetector()
     private var max: Double? = null
     private var thermostatTemp: Double? = null
     private var thermostatAt: Long? = null
+    private var thermostatByDip = false
     private val fanTemps = ArrayList<Double>()
     private var engineOffSince: Long? = null
     var finished = false
@@ -101,14 +102,11 @@ class WarmupAnalyzer(private val startTime: Long, private val startTemp: Double?
         if (!finished && coolant != null) {
             samples.add(now to coolant)
             max = maxOf(max ?: coolant, coolant)
-            val rate = rateAt(now)
             val elapsed = now - startTime
-            if (rate != null && elapsed > 60_000) maxRate = maxOf(maxRate, rate)
-            if (thermostatTemp == null && rate != null && elapsed > 120_000 &&
-                coolant >= 72.0 && maxRate >= 2.5 && rate <= maxRate * 0.35
-            ) {
-                thermostatTemp = coolant
-                thermostatAt = now
+            if (thermostatTemp == null && detector.feed(now, coolant, rpm)) {
+                thermostatTemp = detector.openedTemp
+                thermostatAt = detector.openedAt
+                thermostatByDip = detector.byDip
             }
             // двигатель заглох / заглушен
             if (rpm != null && rpm < 300) {
@@ -156,12 +154,15 @@ class WarmupAnalyzer(private val startTime: Long, private val startTemp: Double?
         val tt = thermostatTemp
         val mx = max
         if (tt != null) {
-            sb.append("Термостат открылся примерно при ${f0(tt)} °C")
-            sb.append(if (tt in 76.0..92.0) " — это нормально.\n" else " — необычно, стоит проверить термостат.\n")
+            sb.append(
+                if (thermostatByDip) "Термостат открылся примерно при ${f0(tt)} °C (в двигатель пришла холодная жидкость из радиатора)"
+                else "Температура встала на «полку» около ${f0(tt)} °C — термостат открыт",
+            )
+            sb.append(if (tt in 78.0..95.0) " — это нормально.\n" else " — необычно, стоит проверить термостат.\n")
         } else if (mx != null && mx < 75 && (System.currentTimeMillis() - startTime) > 15 * 60_000L) {
             sb.append("За 15+ минут двигатель не прогрелся выше ${f0(mx)} °C — похоже на термостат, открытый или подклинивающий в открытом положении.\n")
         } else {
-            sb.append("Момент открытия термостата не определён.\n")
+            sb.append("Термостат за время теста не открылся: температура росла без «полки». Если тест был коротким — это нормально, иначе проверьте термостат.\n")
         }
         if (fanTemps.isNotEmpty()) {
             val first = fanTemps.first()
@@ -170,7 +171,7 @@ class WarmupAnalyzer(private val startTime: Long, private val startTemp: Double?
                 sb.append("Включение ниже 90 °C — раньше обычного. Проверьте, не включён ли кондиционер, датчик температуры и управление вентиляторами.\n")
             }
         } else {
-            sb.append("Включение вентиляторов по напряжению не замечено — сверьте на слух.\n")
+            sb.append("Включение вентиляторов не замечено (их ловим только выше 85 °C при ровных оборотах) — сверьте на слух.\n")
         }
         if (mx != null) {
             sb.append("Максимум: ${f0(mx)} °C — ")
@@ -200,93 +201,6 @@ class WarmupAnalyzer(private val startTime: Long, private val startTemp: Double?
         elapsedMin = (now - startTime) / 60_000.0,
         verdict = verdict,
     )
-}
-
-// ======================= Сводка поездки =======================
-
-data class TripSummary(val text: String)
-
-object TripReport {
-    fun fromCsv(file: File): TripSummary? {
-        val lines = try {
-            file.readLines()
-        } catch (_: Exception) {
-            return null
-        }
-        if (lines.size < 2) return TripSummary("Запись пустая.")
-        val header = lines.first().split(",")
-        fun col(name: String) = header.indexOf(name)
-        val iElapsed = col("elapsed_s")
-        val iCool = col("coolant")
-        val iEcu = col("ecuV")
-        val iAdapter = col(Pids.ADAPTER_V)
-        val iSpeed = col("speed")
-        val iRpm = col("rpm")
-        val iFan = col("fan_event")
-
-        var maxCool: Double? = null
-        var minEcu: Double? = null
-        var maxEcu: Double? = null
-        var maxSpeed = 0.0
-        var distKm = 0.0
-        var above100s = 0.0
-        var fanTemps = ArrayList<Double>()
-        var lastT: Double? = null
-        var duration = 0.0
-        var idleS = 0.0
-
-        for (line in lines.drop(1)) {
-            val c = line.split(",")
-            fun d(i: Int): Double? = if (i >= 0) c.getOrNull(i)?.toDoubleOrNull() else null
-            val t = d(iElapsed) ?: continue
-            val dt = lastT?.let { (t - it).coerceIn(0.0, 10.0) } ?: 0.0
-            lastT = t
-            duration = t
-            val cool = d(iCool)
-            if (cool != null) {
-                maxCool = maxOf(maxCool ?: cool, cool)
-                if (cool >= 100) above100s += dt
-            }
-            val v = d(iEcu) ?: d(iAdapter)
-            val rpm = d(iRpm)
-            if (v != null && (rpm == null || rpm > 400)) {
-                minEcu = minOf(minEcu ?: v, v)
-                maxEcu = maxOf(maxEcu ?: v, v)
-            }
-            val sp = d(iSpeed)
-            if (sp != null) {
-                maxSpeed = maxOf(maxSpeed, sp)
-                distKm += sp * dt / 3600.0
-                if (sp < 1 && (rpm ?: 0.0) > 400) idleS += dt
-            }
-            if (iFan >= 0 && c.getOrNull(iFan) == "1" && cool != null) fanTemps.add(cool)
-        }
-
-        val sb = StringBuilder()
-        sb.append("Поездка ${file.nameWithoutExtension.removePrefix("trip_")}\n")
-        sb.append("Длительность: ${f0(duration / 60)} мин, пробег ≈ ${f1(distKm)} км, макс. скорость ${f0(maxSpeed)} км/ч, на холостых ${f0(idleS / 60)} мин\n")
-        maxCool?.let {
-            sb.append("Температура ОЖ: макс. ${f0(it)} °C")
-            if (above100s > 0) sb.append(", выше 100 °C — ${f1(above100s / 60)} мин")
-            sb.append('\n')
-        }
-        if (fanTemps.isNotEmpty()) {
-            sb.append("Вероятные включения вентиляторов: ${fanTemps.size} (при ${fanTemps.joinToString { f0(it) }} °C)\n")
-        }
-        if (minEcu != null && maxEcu != null) {
-            sb.append("Напряжение на ходу: ${f2(minEcu)}–${f2(maxEcu)} В")
-            if (minEcu < 13.2) sb.append(" — местами низкое, проверьте зарядку")
-            sb.append('\n')
-        }
-        val verdict = when {
-            maxCool == null -> "Данных о температуре нет."
-            maxCool >= Pids.OVERHEAT_C -> "Был перегрев — без диагностики лучше не ездить."
-            maxCool >= 100 -> "Температура поднималась выше нормы."
-            else -> "Температура в норме."
-        }
-        sb.append(verdict)
-        return TripSummary(sb.toString())
-    }
 }
 
 // ======================= Исследование Toyota =======================

@@ -8,8 +8,6 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
 import android.content.Context
-import android.media.AudioManager
-import android.media.ToneGenerator
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -67,7 +65,10 @@ class ObdSession private constructor(private val app: Application) {
     val logFiles = MutableStateFlow<List<File>>(emptyList())
 
     val autoReconnect = MutableStateFlow(prefs.getBoolean("autoReconnect", true))
-    val autoRecord = MutableStateFlow(prefs.getBoolean("autoRecord", false))
+    val autoRecord = MutableStateFlow(prefs.getBoolean("autoRecord", true))
+    val voiceOn = MutableStateFlow(prefs.getBoolean("voiceOn", true))
+    val chargeLow = MutableStateFlow(false)
+    val marks = MutableStateFlow<List<Mark>>(emptyList())
     val battery = MutableStateFlow<BatteryTest?>(null)
     val warmup = MutableStateFlow<WarmupState?>(null)
     val research = MutableStateFlow<List<String>>(emptyList())
@@ -79,9 +80,21 @@ class ObdSession private constructor(private val app: Application) {
     private var sessionJob: Job? = null
     @Volatile
     private var logger: CsvLogger? = null
-    private var voltageEma: Double? = null
-    private var lastFanEventAt = 0L
+    private val fanDetector = FanDetector()
+    private val chargeMonitor = ChargeMonitor()
+    // создаётся в главном потоке (ObdSession.get вызывается из интерфейса) — так надёжнее для TextToSpeech
+    private val voice = Voice(app)
     private var lastAlarmAt = 0L
+    private var warned100 = false
+    private var engineOnSince: Long? = null
+    private var engineOffSince: Long? = null
+    @Volatile
+    private var autoStartedRecording = false
+    @Volatile
+    private var pendingMark: String? = null
+    /** Пользователь сам остановил запись — не перезапускать её до следующего запуска двигателя. */
+    @Volatile
+    private var autoSuppressed = false
     @Volatile
     private var pendingFanFlag = false
     @Volatile
@@ -117,6 +130,12 @@ class ObdSession private constructor(private val app: Application) {
     fun setAutoRecord(v: Boolean) {
         autoRecord.value = v
         prefs.edit().putBoolean("autoRecord", v).apply()
+    }
+
+    fun setVoice(v: Boolean) {
+        voiceOn.value = v
+        prefs.edit().putBoolean("voiceOn", v).apply()
+        if (v) voice.say("Голосовые предупреждения включены")
     }
 
     /** Один раз за запуск приложения: подключиться к последнему адаптеру, если включено автоподключение. */
@@ -243,12 +262,14 @@ class ObdSession private constructor(private val app: Application) {
             val sup = e.supportedPids()
             val active = Pids.ALL.filter { it.pid in sup }
             supportedKeys.value = active.map { it.key }.toSet() + Pids.ADAPTER_V
-            voltageEma = null
+            chargeMonitor.reset()
+            chargeLow.value = false
+            engineOnSince = null
+            engineOffSince = null
             elm = e
             connected = true
             connState.value = ConnState.CONNECTED
             status.value = "Подключено: ${item.name} · ${e.protocolName} · ${e.version}"
-            if (autoRecord.value && logger == null) startRecording()
             pollLoop(e, active)
         } catch (c: CancellationException) {
             throw c
@@ -265,6 +286,7 @@ class ObdSession private constructor(private val app: Application) {
             }
             transport = null
             overheat.value = false
+            chargeLow.value = false
             connState.value = ConnState.DISCONNECTED
         }
         return connected
@@ -351,7 +373,9 @@ class ObdSession private constructor(private val app: Application) {
             val now = System.currentTimeMillis()
             values.value = map
             analyze(now, map)
-            logger?.write(now, map, pendingFanFlag)
+            val mark = pendingMark
+            pendingMark = null
+            logger?.write(now, map, pendingFanFlag, mark)
             pendingFanFlag = false
             historyTick.value = now
             cycle++
@@ -360,44 +384,80 @@ class ObdSession private constructor(private val app: Application) {
 
     private fun analyze(now: Long, map: Map<String, Double>) {
         val coolant = map["coolant"]
+        val rpm = map["rpm"]
+        val v = map["ecuV"] ?: map[Pids.ADAPTER_V]
+
+        // ---- Температура ----
         if (coolant != null) {
             val hot = coolant >= Pids.OVERHEAT_C
             overheat.value = hot
-            if (hot && now - lastAlarmAt > 20_000) {
+            if (hot && now - lastAlarmAt > 30_000) {
                 lastAlarmAt = now
-                beep()
+                alert("Перегрев! Температура ${coolant.toInt()} градусов. Остановитесь и заглушите двигатель.", urgent = true)
+            }
+            if (!warned100 && coolant >= 100 && !hot) {
+                warned100 = true
+                alert("Температура ${coolant.toInt()} градусов.", urgent = false)
+            }
+            if (coolant < 97) warned100 = false
+        }
+
+        // ---- Вентиляторы ----
+        if (fanDetector.feed(now, v, rpm, coolant)) {
+            fanEvents.value = (listOf(FanEvent(now, coolant, fanDetector.lastDrop)) + fanEvents.value).take(50)
+            pendingFanFlag = true
+            warmupAnalyzer?.onFan(coolant)
+        }
+
+        // ---- Зарядка ----
+        if (chargeMonitor.feed(now, v, rpm)) {
+            val vs = v?.let { String.format(Locale("ru"), "%.1f", it) } ?: "?"
+            alert("Внимание. Генератор не заряжает, напряжение $vs вольт.", urgent = false)
+            addMarkInternal(now, "Генератор не заряжает ($vs В)", coolant)
+        }
+        chargeLow.value = chargeMonitor.isLow
+
+        // ---- Автозапись по двигателю ----
+        val running = rpm != null && rpm > 400
+        if (running) {
+            engineOffSince = null
+            val since = engineOnSince ?: now.also { engineOnSince = it }
+            if (autoRecord.value && !autoSuppressed && logger == null && now - since >= 3_000) {
+                startRecording()
+                autoStartedRecording = true
+            }
+        } else if (rpm != null) {
+            engineOnSince = null
+            val since = engineOffSince ?: now.also { engineOffSince = it }
+            if (now - since >= 15_000) autoSuppressed = false
+            if (autoStartedRecording && logger != null && now - since >= 15_000) {
+                stopRecordingInternal()
             }
         }
-        // Вентиляторы — большая нагрузка: в момент включения напряжение на короткое время проседает.
-        val v = map["ecuV"] ?: map[Pids.ADAPTER_V]
-        val rpm = map["rpm"] ?: 0.0
-        if (v != null && rpm > 400) {
-            val ema = voltageEma
-            if (ema != null && ema - v >= 0.2 && now - lastFanEventAt > 30_000) {
-                lastFanEventAt = now
-                fanEvents.value = (listOf(FanEvent(now, coolant, ema - v)) + fanEvents.value).take(50)
-                pendingFanFlag = true
-                warmupAnalyzer?.onFan(coolant)
-            }
-            voltageEma = if (ema == null) v else ema * 0.85 + v * 0.15
-        }
+
         warmupAnalyzer?.let { wa ->
-            val st = wa.update(now, coolant, map["rpm"])
+            val st = wa.update(now, coolant, rpm)
             warmup.value = st
             if (!st.running) warmupAnalyzer = null
         }
     }
 
-    private fun beep() {
-        try {
-            val tg = ToneGenerator(AudioManager.STREAM_ALARM, 100)
-            tg.startTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 1500)
-            scope.launch {
-                delay(2000)
-                tg.release()
-            }
-        } catch (_: Exception) {
-        }
+    private fun alert(text: String, urgent: Boolean) {
+        if (voiceOn.value) voice.say(text, urgent) else if (urgent) voice.beep(true)
+    }
+
+    // ---------- Метки ----------
+
+    fun addMark(label: String) {
+        val text = label.trim()
+        if (text.isEmpty()) return
+        addMarkInternal(System.currentTimeMillis(), text, values.value["coolant"])
+    }
+
+    private fun addMarkInternal(now: Long, label: String, coolant: Double?) {
+        marks.value = (listOf(Mark(now, label, coolant)) + marks.value).take(100)
+        pendingMark = pendingMark?.let { "$it / $label" } ?: label
+        // без записи метка останется только в списке на экране — запись не запущена
     }
 
     // ---------- Тест аккумулятора ----------
@@ -652,11 +712,28 @@ class ObdSession private constructor(private val app: Application) {
     private fun logsDir(): File = File(app.getExternalFilesDir(null) ?: app.filesDir, "logs")
 
     fun toggleRecording() {
-        if (logger != null) stopRecordingInternal() else startRecording()
+        if (logger != null) {
+            autoSuppressed = true
+            stopRecordingInternal()
+        } else {
+            startRecording()
+        }
+    }
+
+    /** PDF-отчёт для мастера по записи поездки. */
+    fun buildReport(f: File): File? {
+        val d = TripData.load(f) ?: return null
+        return try {
+            PdfReport.build(logsDir(), d, dtcResult.value).also { refreshLogs() }
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun startRecording() {
         if (logger != null) return
+        autoStartedRecording = false
+        chargeMonitor.reset()
         val keys = Pids.DISPLAY.map { it.key }
         val l = CsvLogger(logsDir(), keys)
         logger = l
@@ -666,13 +743,14 @@ class ObdSession private constructor(private val app: Application) {
     private fun stopRecordingInternal() {
         val l = logger ?: return
         logger = null
+        autoStartedRecording = false
         l.close()
         recordingFile.value = null
         refreshLogs()
     }
 
     fun refreshLogs() {
-        logFiles.value = logsDir().listFiles { f -> f.name.endsWith(".csv") || f.name.endsWith(".txt") }
+        logFiles.value = logsDir().listFiles { f -> f.name.endsWith(".csv") || f.name.endsWith(".txt") || f.name.endsWith(".pdf") }
             ?.sortedByDescending { it.lastModified() }
             ?: emptyList()
     }

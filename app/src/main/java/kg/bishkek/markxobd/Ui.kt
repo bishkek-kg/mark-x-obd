@@ -78,6 +78,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import java.io.File
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -100,7 +101,10 @@ fun AppTheme(content: @Composable () -> Unit) {
 }
 
 private enum class Tab(val title: String) {
-    CONNECT("Связь"), DASH("Датчики"), CHARTS("Графики"), TESTS("Тесты"), DTC("Ошибки"), LOGS("Записи")
+    CONNECT("Связь"), DASH("Датчики"), CHARTS("Графики"), TESTS("Тесты"), DTC("Ошибки"), LOGS("Записи"),
+
+    /** Полноэкранный режим «В дороге» — открывается с вкладки «Датчики», в нижнем меню его нет. */
+    DRIVE("В дороге")
 }
 
 // ---------------- Корень ----------------
@@ -147,10 +151,15 @@ fun App() {
         if (connState == ConnState.CONNECTED && tab == Tab.CONNECT) tab = Tab.DASH
     }
 
+    if (tab == Tab.DRIVE) {
+        DriveScreen(vm) { tab = Tab.DASH }
+        return
+    }
+
     Scaffold(
         bottomBar = {
             NavigationBar {
-                Tab.entries.forEach { t ->
+                Tab.entries.filter { it != Tab.DRIVE }.forEach { t ->
                     NavigationBarItem(
                         selected = tab == t,
                         onClick = { tab = t },
@@ -162,7 +171,7 @@ fun App() {
                                     Tab.CHARTS -> Icons.Filled.DateRange
                                     Tab.TESTS -> Icons.Filled.Build
                                     Tab.DTC -> Icons.Filled.Warning
-                                    Tab.LOGS -> Icons.Filled.List
+                                    Tab.LOGS, Tab.DRIVE -> Icons.Filled.List
                                 },
                                 contentDescription = t.title,
                             )
@@ -186,11 +195,12 @@ fun App() {
             }
             when (tab) {
                 Tab.CONNECT -> ConnectScreen(vm)
-                Tab.DASH -> DashboardScreen(vm)
+                Tab.DASH -> DashboardScreen(vm) { tab = Tab.DRIVE }
                 Tab.CHARTS -> ChartsScreen(vm)
                 Tab.TESTS -> TestsScreen(vm)
                 Tab.DTC -> DtcScreen(vm)
                 Tab.LOGS -> LogsScreen(vm)
+                Tab.DRIVE -> Unit
             }
         }
     }
@@ -202,6 +212,7 @@ private fun TopStatus(vm: ObdSession) {
     val overheat by vm.overheat.collectAsState()
     val values by vm.values.collectAsState()
     val rec by vm.recordingFile.collectAsState()
+    val chargeLow by vm.chargeLow.collectAsState()
     if (overheat) {
         Surface(color = MaterialTheme.colorScheme.error, modifier = Modifier.fillMaxWidth()) {
             Text(
@@ -209,6 +220,16 @@ private fun TopStatus(vm: ObdSession) {
                 color = MaterialTheme.colorScheme.onError,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.padding(12.dp),
+            )
+        }
+    }
+    if (chargeLow) {
+        Surface(color = MaterialTheme.colorScheme.tertiaryContainer, modifier = Modifier.fillMaxWidth()) {
+            Text(
+                "Генератор не заряжает: ${(values["ecuV"] ?: values[Pids.ADAPTER_V])?.let { String.format(Locale.US, "%.1f", it) } ?: "?"} В на работающем двигателе. Уменьшите нагрузку (печка, фары) и проверьте генератор.",
+                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(10.dp),
             )
         }
     }
@@ -242,6 +263,7 @@ private fun ConnectScreen(vm: ObdSession) {
     val last = vm.lastDevice
     val autoReconnect by vm.autoReconnect.collectAsState()
     val autoRecord by vm.autoRecord.collectAsState()
+    val voiceOn by vm.voiceOn.collectAsState()
 
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (!btOn) {
@@ -283,8 +305,11 @@ private fun ConnectScreen(vm: ObdSession) {
                     SwitchRow("Автоподключение", "При запуске приложения и при обрыве связи", autoReconnect) {
                         vm.setAutoReconnect(it)
                     }
-                    SwitchRow("Автозапись поездки", "Начинать запись сразу после подключения", autoRecord) {
+                    SwitchRow("Автозапись по двигателю", "Запись начинается при запуске двигателя и сохраняется, когда он заглушён", autoRecord) {
                         vm.setAutoRecord(it)
+                    }
+                    SwitchRow("Голосовые предупреждения", "Перегрев, 100 °C, генератор не заряжает. Без русского голоса — звуковой сигнал", voiceOn) {
+                        vm.setVoice(it)
                     }
                 }
             }
@@ -361,7 +386,7 @@ private fun DeviceRow(d: DeviceItem, enabled: Boolean, onClick: () -> Unit) {
 // ---------------- Датчики ----------------
 
 @Composable
-private fun DashboardScreen(vm: ObdSession) {
+private fun DashboardScreen(vm: ObdSession, onDrive: () -> Unit) {
     val values by vm.values.collectAsState()
     val supported by vm.supportedKeys.collectAsState()
     val charts by vm.chartKeys.collectAsState()
@@ -371,13 +396,16 @@ private fun DashboardScreen(vm: ObdSession) {
 
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                "Нажмите на плитку, чтобы добавить или убрать её из графиков",
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.weight(1f),
-            )
+            Button(onClick = onDrive) { Text("Режим «В дороге»") }
+            Spacer(Modifier.weight(1f))
             RecordButton(rec != null, connState == ConnState.CONNECTED) { vm.toggleRecording() }
         }
+        MarksBar(vm, Modifier.padding(horizontal = 12.dp))
+        Text(
+            "Нажмите на плитку, чтобы добавить или убрать её из графиков",
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(horizontal = 12.dp),
+        )
         LazyVerticalGrid(
             columns = GridCells.Fixed(2),
             contentPadding = PaddingValues(12.dp),
@@ -410,6 +438,138 @@ private fun DashboardScreen(vm: ObdSession) {
                             Spacer(Modifier.width(4.dp))
                             Text(p.unit, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(bottom = 4.dp))
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------- Метки ----------------
+
+private val QUICK_MARKS = listOf("Пузыри", "Патрубок горячий", "Вентилятор", "Долил ОЖ")
+
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+fun MarksBar(vm: ObdSession, modifier: Modifier = Modifier, big: Boolean = false) {
+    val ctx = LocalContext.current
+    var showNote by remember { mutableStateOf(false) }
+    var note by remember { mutableStateOf("") }
+    val rec by vm.recordingFile.collectAsState()
+    Column(modifier) {
+        Text(
+            if (rec != null) "Метки — сохраняются в записи" else "Метки (запись не идёт — метка останется только на экране)",
+            style = MaterialTheme.typography.labelSmall,
+        )
+        androidx.compose.foundation.layout.FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            (QUICK_MARKS + "Заметка…").forEach { label ->
+                OutlinedButton(
+                    onClick = {
+                        if (label == "Заметка…") {
+                            showNote = true
+                        } else {
+                            vm.addMark(label)
+                            android.widget.Toast.makeText(ctx, "Метка: $label", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    contentPadding = PaddingValues(horizontal = if (big) 16.dp else 10.dp, vertical = if (big) 12.dp else 4.dp),
+                ) { Text(label, fontSize = if (big) 16.sp else 13.sp) }
+            }
+        }
+    }
+    if (showNote) {
+        AlertDialog(
+            onDismissRequest = { showNote = false },
+            title = { Text("Заметка") },
+            text = {
+                OutlinedTextField(value = note, onValueChange = { note = it }, singleLine = true, label = { Text("Что произошло") })
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.addMark(note)
+                    note = ""
+                    showNote = false
+                }) { Text("Сохранить") }
+            },
+            dismissButton = { TextButton(onClick = { showNote = false }) { Text("Отмена") } },
+        )
+    }
+}
+
+// ---------------- В дороге ----------------
+
+@Composable
+private fun DriveScreen(vm: ObdSession, onExit: () -> Unit) {
+    val values by vm.values.collectAsState()
+    val connState by vm.connState.collectAsState()
+    val chargeLow by vm.chargeLow.collectAsState()
+    val rec by vm.recordingFile.collectAsState()
+    val marks by vm.marks.collectAsState()
+    val coolant = values["coolant"]
+    val volt = values["ecuV"] ?: values[Pids.ADAPTER_V]
+    val bg = when {
+        coolant == null -> Color(0xFF263238)
+        coolant >= Pids.OVERHEAT_C -> Color(0xFFB71C1C)
+        coolant >= 100 -> Color(0xFFE6A100)
+        else -> Color(0xFF1B5E20)
+    }
+    val fg = if (coolant != null && coolant >= 100 && coolant < Pids.OVERHEAT_C) Color.Black else Color.White
+    val timeFmt = remember { SimpleDateFormat("HH:mm", Locale.US) }
+    Surface(color = bg, modifier = Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize().padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    when (connState) {
+                        ConnState.CONNECTED -> if (rec != null) "● запись" else "запись не идёт"
+                        else -> "нет связи с адаптером"
+                    },
+                    color = fg,
+                    modifier = Modifier.weight(1f),
+                )
+                Button(onClick = onExit) { Text("Выйти") }
+            }
+            Spacer(Modifier.weight(1f))
+            Text("Температура ОЖ", color = fg, fontSize = 18.sp)
+            Text(
+                coolant?.let { "${it.toInt()}°" } ?: "—",
+                color = fg,
+                fontSize = 120.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.height(8.dp))
+            Row {
+                Column(Modifier.weight(1f)) {
+                    Text("Напряжение", color = fg, fontSize = 16.sp)
+                    Text(
+                        volt?.let { String.format(Locale.US, "%.1f В", it) } ?: "—",
+                        color = if (chargeLow) Color(0xFFFFD54F) else fg,
+                        fontSize = 44.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    if (chargeLow) Text("не заряжает", color = Color(0xFFFFD54F), fontSize = 14.sp)
+                }
+                Column(Modifier.weight(1f)) {
+                    Text("Обороты / скорость", color = fg, fontSize = 16.sp)
+                    Text(
+                        "${values["rpm"]?.toInt() ?: "—"} · ${values["speed"]?.toInt() ?: "—"}",
+                        color = fg,
+                        fontSize = 32.sp,
+                    )
+                }
+            }
+            Spacer(Modifier.weight(1f))
+            Surface(color = Color.White.copy(alpha = 0.92f), shape = MaterialTheme.shapes.medium) {
+                Column(Modifier.padding(10.dp)) {
+                    MarksBar(vm, big = true)
+                    marks.firstOrNull()?.let { m ->
+                        Text(
+                            "Последняя: ${timeFmt.format(Date(m.time))} — ${m.label}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.Black,
+                        )
                     }
                 }
             }
@@ -486,7 +646,7 @@ private fun ChartsScreen(vm: ObdSession) {
                 Column(Modifier.padding(12.dp)) {
                     Text("Вероятные включения вентиляторов", fontWeight = FontWeight.Medium)
                     Text(
-                        "Определяются по кратковременной просадке напряжения на работающем двигателе. Это ориентир — сверяйте на слух.",
+                        "Определяются по ступенчатой просадке напряжения при ровных оборотах и ОЖ выше 85 °C. Это ориентир — сверяйте на слух и ставьте метку «Вентилятор».",
                         style = MaterialTheme.typography.bodySmall,
                     )
                     Spacer(Modifier.height(6.dp))
@@ -689,20 +849,31 @@ private fun LogsScreen(vm: ObdSession) {
     val rec by vm.recordingFile.collectAsState()
     val connState by vm.connState.collectAsState()
     val ctx = LocalContext.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
     var expanded by remember { mutableStateOf<String?>(null) }
+    var selected by remember { mutableStateOf<List<String>>(emptyList()) }
+    var busy by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) { vm.refreshLogs() }
 
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "Записи поездок (CSV) и журналы исследований (TXT). Их можно отправить в Telegram или в чат с Claude для разбора.",
+                    "Записи поездок (CSV), отчёты (PDF) и журналы исследований (TXT). Отметьте две поездки галочкой, чтобы сравнить.",
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.weight(1f),
                 )
                 RecordButton(rec != null, connState == ConnState.CONNECTED) { vm.toggleRecording() }
             }
         }
+        if (selected.size == 2) {
+            item(key = "compare") {
+                CompareCard(File(selected[0]), File(selected[1])) { selected = emptyList() }
+            }
+        } else if (selected.size == 1) {
+            item { Text("Выбрана 1 поездка — отметьте ещё одну для сравнения", style = MaterialTheme.typography.bodySmall) }
+        }
+        busy?.let { b -> item { Text(b, fontWeight = FontWeight.Medium) } }
         if (files.isEmpty()) item { Text("Записей пока нет") }
         items(files, key = { it.absolutePath }) { f ->
             val isCsv = f.name.endsWith(".csv")
@@ -713,19 +884,43 @@ private fun LogsScreen(vm: ObdSession) {
             }
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(12.dp)) {
-                    Text(f.name, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                    Text(
-                        (if (recording) "идёт запись · " else "") + "${f.length() / 1024} КБ",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (isCsv && !recording) {
+                            androidx.compose.material3.Checkbox(
+                                checked = f.absolutePath in selected,
+                                onCheckedChange = { on ->
+                                    selected = if (on) (selected + f.absolutePath).takeLast(2) else selected - f.absolutePath
+                                },
+                            )
+                        }
+                        Column(Modifier.weight(1f)) {
+                            Text(f.name, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                            Text(
+                                (if (recording) "идёт запись · " else "") + "${f.length() / 1024} КБ",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                    }
                     Row {
                         if (isCsv && !recording) {
                             TextButton(onClick = { expanded = if (open) null else f.absolutePath }) {
                                 Text(if (open) "Скрыть сводку" else "Сводка")
                             }
-                        }
-                        if (!recording) {
-                            TextButton(onClick = { saveToDownloads(ctx, f) }) { Text("Скачать") }
+                            TextButton(
+                                enabled = busy == null,
+                                onClick = {
+                                    busy = "Готовлю отчёт PDF…"
+                                    scope.launch {
+                                        val pdf = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { vm.buildReport(f) }
+                                        busy = null
+                                        if (pdf != null) {
+                                            shareFile(ctx, pdf, "Отчёт по поездке Toyota Mark X")
+                                        } else {
+                                            android.widget.Toast.makeText(ctx, "Не удалось сделать отчёт", android.widget.Toast.LENGTH_LONG).show()
+                                        }
+                                    }
+                                },
+                            ) { Text("Отчёт PDF") }
                         }
                     }
                     Row {
@@ -734,7 +929,11 @@ private fun LogsScreen(vm: ObdSession) {
                             shareFile(ctx, f, text)
                         }) { Text("Отправить") }
                         if (!recording) {
-                            TextButton(onClick = { vm.deleteLog(f) }) { Text("Удалить") }
+                            TextButton(onClick = { saveToDownloads(ctx, f) }) { Text("Скачать") }
+                            TextButton(onClick = {
+                                selected = selected - f.absolutePath
+                                vm.deleteLog(f)
+                            }) { Text("Удалить") }
                         }
                     }
                     if (summary != null) {
@@ -746,6 +945,117 @@ private fun LogsScreen(vm: ObdSession) {
     }
 }
 
+// ---------------- Сравнение поездок ----------------
+
+@Composable
+private fun CompareCard(a: File, b: File, onClose: () -> Unit) {
+    val da = remember(a.absolutePath) { TripData.load(a) }
+    val db = remember(b.absolutePath) { TripData.load(b) }
+    val colorA = MaterialTheme.colorScheme.primary
+    val colorB = Color(0xFFE65100)
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Сравнение поездок", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                TextButton(onClick = onClose) { Text("Закрыть") }
+            }
+            if (da == null || db == null) {
+                Text("Не удалось прочитать файлы")
+                return@Column
+            }
+            Text("— ${a.nameWithoutExtension.removePrefix("trip_")}", color = colorA, fontSize = 13.sp)
+            Text("— ${b.nameWithoutExtension.removePrefix("trip_")}", color = colorB, fontSize = 13.sp)
+            Spacer(Modifier.height(8.dp))
+            Text("Температура ОЖ, °C", style = MaterialTheme.typography.labelMedium)
+            MultiChart(listOf(da.series("coolant") to colorA, db.series("coolant") to colorB), danger = Pids.OVERHEAT_C.toFloat())
+            Spacer(Modifier.height(8.dp))
+            Text("Напряжение, В", style = MaterialTheme.typography.labelMedium)
+            MultiChart(listOf(da.voltageSeries() to colorA, db.voltageSeries() to colorB), danger = null, low = CHARGE_LOW_V.toFloat())
+            Spacer(Modifier.height(8.dp))
+            val sa = remember(a.absolutePath) { TripReport.stats(da) }
+            val sb = remember(b.absolutePath) { TripReport.stats(db) }
+            fun n0(v: Double?) = v?.let { String.format(Locale.US, "%.0f", it) } ?: "—"
+            fun n1(v: Double?) = v?.let { String.format(Locale.US, "%.1f", it) } ?: "—"
+            val rows = listOf(
+                "Длительность, мин" to (n0(sa.durationMin) to n0(sb.durationMin)),
+                "Пробег, км" to (n1(sa.distKm) to n1(sb.distKm)),
+                "Макс. ОЖ, °C" to (n0(sa.maxCoolant) to n0(sb.maxCoolant)),
+                "Выше 100 °C, мин" to (n1(sa.above100Min) to n1(sb.above100Min)),
+                "«Полка» термостата, °C" to (n0(sa.plateau) to n0(sb.plateau)),
+                "Мин. напряжение, В" to (n1(sa.minV) to n1(sb.minV)),
+                "Без зарядки, мин" to (n1(sa.chargeLowMin) to n1(sb.chargeLowMin)),
+            )
+            rows.forEach { (label, pair) ->
+                Row {
+                    Text(label, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                    Text(pair.first, color = colorA, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.width(56.dp))
+                    Text(pair.second, color = colorB, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.width(56.dp))
+                }
+            }
+        }
+    }
+}
+
+/** Несколько рядов (минуты от начала, значение) на одном графике. */
+@Composable
+private fun MultiChart(series: List<Pair<List<Pair<Float, Float>>, Color>>, danger: Float?, low: Float? = null) {
+    val gridColor = MaterialTheme.colorScheme.outlineVariant
+    val textColor = MaterialTheme.colorScheme.onSurfaceVariant
+    val dangerColor = MaterialTheme.colorScheme.error
+    val lowColor = Color(0xFFE6A100)
+    val textPx = with(LocalDensity.current) { 11.sp.toPx() }
+    val all = series.flatMap { it.first }
+    Canvas(Modifier.fillMaxWidth().height(170.dp)) {
+        val paint = android.graphics.Paint().apply {
+            color = textColor.toArgb()
+            textSize = textPx
+            isAntiAlias = true
+        }
+        val native = drawContext.canvas.nativeCanvas
+        if (all.isEmpty()) {
+            native.drawText("Нет данных", 40f, size.height / 2, paint)
+            return@Canvas
+        }
+        val left = 40.dp.toPx()
+        val right = size.width - 4.dp.toPx()
+        val top = 6.dp.toPx()
+        val bottom = size.height - 18.dp.toPx()
+        var minV = all.minOf { it.second }
+        var maxV = all.maxOf { it.second }
+        if (danger != null && maxV > danger - 10f) maxV = maxOf(maxV, danger + 1f)
+        if (low != null && minV < low + 1f) minV = minOf(minV, low - 0.5f)
+        if (maxV - minV < 1f) {
+            maxV += 0.5f
+            minV -= 0.5f
+        }
+        val pad = (maxV - minV) * 0.08f
+        minV -= pad
+        maxV += pad
+        val maxX = maxOf(all.maxOf { it.first }, 0.1f)
+        fun x(m: Float) = left + (right - left) * (m / maxX)
+        fun y(v: Float) = bottom - (bottom - top) * ((v - minV) / (maxV - minV))
+        for (i in 0..4) {
+            val v = minV + (maxV - minV) * i / 4f
+            drawLine(gridColor, Offset(left, y(v)), Offset(right, y(v)), 1f)
+            native.drawText(
+                if (maxV - minV < 10f) String.format(Locale.US, "%.1f", v) else String.format(Locale.US, "%.0f", v),
+                0f, y(v) + textPx / 3f, paint,
+            )
+        }
+        danger?.let { if (it in minV..maxV) drawLine(dangerColor, Offset(left, y(it)), Offset(right, y(it)), 2f) }
+        low?.let { if (it in minV..maxV) drawLine(lowColor, Offset(left, y(it)), Offset(right, y(it)), 2f) }
+        series.forEach { (pts, color) ->
+            if (pts.isEmpty()) return@forEach
+            val path = Path()
+            pts.forEachIndexed { i, (m, v) -> if (i == 0) path.moveTo(x(m), y(v)) else path.lineTo(x(m), y(v)) }
+            drawPath(path, color, style = Stroke(width = 2.dp.toPx()))
+        }
+        native.drawText("0 мин", left, size.height - 2f, paint)
+        paint.textAlign = android.graphics.Paint.Align.RIGHT
+        native.drawText(String.format(Locale.US, "%.0f мин", maxX), right, size.height - 2f, paint)
+    }
+}
+
 /** Копирует файл в «Загрузки/MarkXOBD», чтобы его можно было прикрепить в любом приложении. */
 private fun saveToDownloads(ctx: android.content.Context, f: File) {
     val ok = try {
@@ -754,7 +1064,11 @@ private fun saveToDownloads(ctx: android.content.Context, f: File) {
                 put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, f.name)
                 put(
                     android.provider.MediaStore.MediaColumns.MIME_TYPE,
-                    if (f.name.endsWith(".csv")) "text/csv" else "text/plain",
+                    when {
+                        f.name.endsWith(".csv") -> "text/csv"
+                        f.name.endsWith(".pdf") -> "application/pdf"
+                        else -> "text/plain"
+                    },
                 )
                 put(
                     android.provider.MediaStore.MediaColumns.RELATIVE_PATH,
@@ -791,7 +1105,11 @@ private fun shareFile(ctx: android.content.Context, f: File, text: String?) {
     try {
         val uri = FileProvider.getUriForFile(ctx, ctx.packageName + ".files", f)
         val intent = Intent(Intent.ACTION_SEND).apply {
-            type = if (f.name.endsWith(".csv")) "text/csv" else "text/plain"
+            type = when {
+                f.name.endsWith(".csv") -> "text/csv"
+                f.name.endsWith(".pdf") -> "application/pdf"
+                else -> "text/plain"
+            }
             putExtra(Intent.EXTRA_STREAM, uri)
             if (text != null) putExtra(Intent.EXTRA_TEXT, text)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)

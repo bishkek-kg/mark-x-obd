@@ -436,7 +436,7 @@ class ObdSession private constructor(private val app: Application) {
         }
 
         warmupAnalyzer?.let { wa ->
-            val st = wa.update(now, coolant, rpm)
+            val st = wa.update(now, coolant, rpm, map["speed"])
             warmup.value = st
             if (!st.running) warmupAnalyzer = null
         }

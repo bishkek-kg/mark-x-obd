@@ -98,12 +98,12 @@ class WarmupAnalyzer(private val startTime: Long, private val startTemp: Double?
         if (!finished && coolant != null) fanTemps.add(coolant)
     }
 
-    fun update(now: Long, coolant: Double?, rpm: Double?): WarmupState {
+    fun update(now: Long, coolant: Double?, rpm: Double?, speed: Double? = null): WarmupState {
         if (!finished && coolant != null) {
             samples.add(now to coolant)
             max = maxOf(max ?: coolant, coolant)
             val elapsed = now - startTime
-            if (thermostatTemp == null && detector.feed(now, coolant, rpm)) {
+            if (thermostatTemp == null && detector.feed(now, coolant, rpm, speed)) {
                 thermostatTemp = detector.openedTemp
                 thermostatAt = detector.openedAt
                 thermostatByDip = detector.byDip

@@ -14,12 +14,15 @@ const val CHARGE_LOW_V = 13.0
 
 /**
  * Определяет открытие термостата по единственному датчику ОЖ.
- * Признаки: устойчивая «полка» (3 мин в коридоре ±0,75 °C) после прогрева
- * или «ступенька» вниз на 2+ °C — в двигатель пришла холодная жидкость из радиатора.
+ * Признаки: устойчивая «полка» (4 мин в коридоре 1 °C) после прогрева
+ * или — только на стоянке — «ступенька» вниз на 2+ °C: в двигатель пришла холодная жидкость из радиатора.
+ * На ходу температура колеблется от нагрузки, поэтому там «ступеньку» не ищем.
  */
 class ThermostatDetector {
     private val buf = ArrayDeque<Pair<Long, Double>>()
     private var minSeen: Double? = null
+    private var firstSeen: Double? = null
+    private var lastMovingAt = 0L
 
     var openedTemp: Double? = null
         private set
@@ -29,34 +32,38 @@ class ThermostatDetector {
         private set
 
     /** Возвращает true в момент, когда открытие обнаружено. */
-    fun feed(t: Long, coolant: Double, rpm: Double?): Boolean {
+    fun feed(t: Long, coolant: Double, rpm: Double?, speed: Double? = null): Boolean {
         if (openedAt != null) return false
         if (rpm != null && rpm < 300) {
             buf.clear()
             return false
         }
+        if (firstSeen == null) firstSeen = coolant
         minSeen = minOf(minSeen ?: coolant, coolant)
+        if (speed != null && speed > 3) lastMovingAt = t
         buf.addLast(t to coolant)
-        while (buf.isNotEmpty() && t - buf.first().first > 240_000) buf.removeFirst()
+        while (buf.isNotEmpty() && t - buf.first().first > 300_000) buf.removeFirst()
 
-        val warmedUp = coolant >= 75 && coolant - (minSeen ?: coolant) >= 10
+        // прогрет: вырос на 10+ °C от минимума или запись начата уже на горячем двигателе
+        val warmedUp = coolant >= 75 && (coolant - (minSeen ?: coolant) >= 10 || (firstSeen ?: 0.0) >= 75)
         if (!warmedUp) return false
 
-        // «ступенька» вниз за последнюю минуту
+        // «ступенька» вниз за последнюю минуту — только если всю минуту стояли
         val recent = buf.filter { it.first >= t - 60_000 }
         val peak = recent.maxByOrNull { it.second }
-        if (peak != null && peak.second >= 75 && peak.second - coolant >= 2.0) {
+        val parked = t - lastMovingAt >= 60_000
+        if (parked && peak != null && peak.second >= 75 && peak.second - coolant >= 2.0) {
             openedTemp = peak.second
             openedAt = peak.first
             byDip = true
             return true
         }
         // «полка»
-        val window = buf.filter { it.first >= t - 180_000 }
-        if (window.isNotEmpty() && t - window.first().first >= 170_000) {
+        val window = buf.filter { it.first >= t - 240_000 }
+        if (window.isNotEmpty() && t - window.first().first >= 230_000) {
             val mx = window.maxOf { it.second }
             val mn = window.minOf { it.second }
-            if (mx - mn <= 1.5) {
+            if (mx - mn <= 1.0) {
                 openedTemp = window.map { it.second }.average()
                 openedAt = window.first().first
                 return true
@@ -92,8 +99,10 @@ class FanDetector {
         if (before.size < 3 || after.size < 2) return false
         val rpms = (before + after).map { it.rpm }
         if (rpms.max() - rpms.min() > 100) return false
-        val drop = median(before.map { it.v }) - median(after.map { it.v })
-        if (drop >= 0.15) {
+        val afterV = median(after.map { it.v })
+        val drop = median(before.map { it.v }) - afterV
+        // если напряжение упало ниже 13 В — это скорее генератор перестал заряжать, а не вентиляторы
+        if (drop >= 0.15 && afterV >= CHARGE_LOW_V) {
             lastAt = t
             lastDrop = drop
             return true
@@ -287,7 +296,7 @@ object TripReport {
                 maxCool = maxOf(maxCool ?: c, c)
                 if (c >= 100) above100 += dt
                 if (c >= Pids.OVERHEAT_C) above105 += dt
-                thermo.feed(ms, c, r)
+                thermo.feed(ms, c, r, sp)
             }
             if (sp != null) {
                 maxSpeed = maxOf(maxSpeed, sp)

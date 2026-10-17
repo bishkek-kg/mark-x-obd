@@ -8,7 +8,7 @@ private fun a1(v: Double) = String.format(Locale.US, "%.1f", v)
 private fun a2(v: Double) = String.format(Locale.US, "%.2f", v)
 
 /** Порог, ниже которого на работающем двигателе генератор считается не заряжающим. */
-const val CHARGE_LOW_V = 13.0
+val CHARGE_LOW_V: Double get() = Thresholds.lowV
 
 /** Ниже этой температуры включения вентиляторов не ищем. */
 const val FAN_MIN_COOLANT = 60.0
@@ -269,7 +269,23 @@ data class TripStats(
     val minV: Double?,
     val maxV: Double?,
     val chargeLowMin: Double,
+    // топливо
+    val fuelL: Double,
+    val avgL100: Double?,
+    val cost: Double?,
+    // стиль вождения
+    val hardAccel: Int,
+    val hardBrake: Int,
+    val highRpmMin: Double,
+    val styleScore: Int,
+    /** Средние холостые на прогретом двигателе (ОЖ ≥ 80 °C, стоим). */
+    val warmIdleRpm: Double?,
 )
+
+/** Пороги резких манёвров, м/с². ~0,3 g разгон и ~0,35 g торможение. */
+private const val HARD_ACCEL = 3.0
+private const val HARD_BRAKE = -3.5
+private const val HIGH_RPM = 4000.0
 
 data class TripSummary(val text: String, val stats: TripStats? = null)
 
@@ -290,6 +306,17 @@ object TripReport {
         val fanTemps = ArrayList<Double>()
         val thermo = ThermostatDetector()
         val charge = ChargeMonitor()
+        val maf = d.col("maf")
+        val load = d.col("load")
+        var fuel = 0.0
+        var hardA = 0
+        var hardB = 0
+        var lastEventT = -1e9
+        var prevSpT: Double? = null
+        var prevSp: Double? = null
+        var highRpm = 0.0
+        var idleRpmSum = 0.0
+        var idleRpmN = 0
         for (i in d.t.indices) {
             val dt = if (i == 0) 0.0 else (d.t[i] - d.t[i - 1]).coerceIn(0.0, 10.0)
             val c = cool?.get(i)
@@ -307,7 +334,28 @@ object TripReport {
                 maxSpeed = maxOf(maxSpeed, sp)
                 dist += sp * dt / 3600.0
                 if (sp < 1 && (r ?: 0.0) > 400) idle += dt
+                // ускорение между соседними замерами скорости
+                val pt = prevSpT
+                val ps = prevSp
+                if (pt != null && ps != null) {
+                    val sdt = d.t[i] - pt
+                    if (sdt in 0.5..3.0) {
+                        val acc = (sp - ps) / 3.6 / sdt
+                        if (d.t[i] - lastEventT > 5) {
+                            if (acc >= HARD_ACCEL) { hardA++; lastEventT = d.t[i] }
+                            else if (acc <= HARD_BRAKE) { hardB++; lastEventT = d.t[i] }
+                        }
+                    }
+                }
+                prevSpT = d.t[i]
+                prevSp = sp
+                if (sp < 1 && r != null && r > 400 && c != null && c >= 80) {
+                    idleRpmSum += r
+                    idleRpmN++
+                }
             }
+            if (r != null && r > HIGH_RPM) highRpm += dt
+            Fuel.airflow(maf?.get(i), load?.get(i), r)?.let { m -> if ((r ?: 0.0) > 300) fuel += Fuel.litersPerHour(m) * dt / 3600.0 }
             if (vv != null && (r == null || r > 500)) {
                 minV = minOf(minV ?: vv, vv)
                 maxV = maxOf(maxV ?: vv, vv)
@@ -328,6 +376,14 @@ object TripReport {
             minV = minV,
             maxV = maxV,
             chargeLowMin = charge.totalLowMs / 60_000.0,
+            fuelL = fuel,
+            avgL100 = if (dist >= 1.0) fuel / dist * 100.0 else null,
+            cost = if (Thresholds.fuelPrice > 0) fuel * Thresholds.fuelPrice else null,
+            hardAccel = hardA,
+            hardBrake = hardB,
+            highRpmMin = highRpm / 60,
+            styleScore = (100 - hardA * 5 - hardB * 5 - (highRpm / 60 * 3).toInt()).coerceIn(0, 100),
+            warmIdleRpm = if (idleRpmN >= 5) idleRpmSum / idleRpmN else null,
         )
     }
 
@@ -352,6 +408,18 @@ object TripReport {
         if (s.fanTemps.isNotEmpty()) {
             sb.append("Вероятные включения вентиляторов: ${s.fanTemps.size} (при ${s.fanTemps.joinToString { a0(it) }} °C)\n")
         }
+        if (s.fuelL > 0.01) {
+            sb.append("Топливо: ≈ ${a2(s.fuelL)} л")
+            s.avgL100?.let { sb.append(", ≈ ${a1(it)} л/100 км") }
+            s.cost?.let { sb.append(", ≈ ${a0(it)} сом") }
+            sb.append(" (оценка по MAF)\n")
+        }
+        if (s.distKm >= 1.0) {
+            sb.append("Стиль: ${s.styleScore}/100 — резких разгонов ${s.hardAccel}, резких торможений ${s.hardBrake}")
+            if (s.highRpmMin >= 0.1) sb.append(", выше 4000 об/мин ${a1(s.highRpmMin)} мин")
+            sb.append('\n')
+        }
+        s.warmIdleRpm?.let { sb.append("Холостые на прогретом: ≈ ${a0(it)} об/мин\n") }
         if (s.minV != null && s.maxV != null) {
             sb.append("Напряжение на работающем двигателе: ${a2(s.minV)}–${a2(s.maxV)} В\n")
         }

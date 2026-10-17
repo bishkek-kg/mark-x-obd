@@ -74,6 +74,22 @@ class ObdSession private constructor(private val app: Application) {
     val research = MutableStateFlow<List<String>>(emptyList())
     val researchBusy = MutableStateFlow(false)
 
+    // ---- новые возможности ----
+    val thresholds = MutableStateFlow(loadThresholds())
+    val liveTrip = MutableStateFlow<LiveTrip?>(null)
+    val accel = MutableStateFlow<AccelState?>(null)
+    val accelHistory = MutableStateFlow(loadAccelHistory())
+    val misfires = MutableStateFlow<MisfireResult?>(null)
+    val misfireBusy = MutableStateFlow(false)
+    val newDtc = MutableStateFlow<List<String>>(emptyList())
+    val driveNight = MutableStateFlow(prefs.getBoolean("driveNight", true))
+    val gpsOn = MutableStateFlow(prefs.getBoolean("gpsOn", false))
+    val gps = GpsTracker(app)
+    @Volatile
+    private var accelRun: AccelRun? = null
+    private var lastRpmAlertAt = 0L
+    private var lastPollAt = 0L
+
     private var transport: Transport? = null
     @Volatile
     private var elm: Elm327? = null
@@ -130,6 +146,53 @@ class ObdSession private constructor(private val app: Application) {
     fun setAutoRecord(v: Boolean) {
         autoRecord.value = v
         prefs.edit().putBoolean("autoRecord", v).apply()
+    }
+
+    fun setThresholds(t: ThresholdValues) {
+        val fixed = t.copy(
+            overheat = t.overheat.coerceIn(90.0, 130.0),
+            warn = t.warn.coerceIn(80.0, t.overheat.coerceIn(90.0, 130.0)),
+            lowV = t.lowV.coerceIn(11.0, 14.5),
+            rpmMax = if (t.rpmMax <= 0) 0.0 else t.rpmMax.coerceIn(1500.0, 8000.0),
+            fuelPrice = t.fuelPrice.coerceAtLeast(0.0),
+        )
+        fixed.apply()
+        thresholds.value = fixed
+        prefs.edit()
+            .putFloat("thOverheat", fixed.overheat.toFloat())
+            .putFloat("thWarn", fixed.warn.toFloat())
+            .putFloat("thLowV", fixed.lowV.toFloat())
+            .putFloat("thRpm", fixed.rpmMax.toFloat())
+            .putFloat("fuelPrice", fixed.fuelPrice.toFloat())
+            .apply()
+    }
+
+    private fun loadThresholds(): ThresholdValues {
+        val d = ThresholdValues()
+        val t = ThresholdValues(
+            overheat = prefs.getFloat("thOverheat", d.overheat.toFloat()).toDouble(),
+            warn = prefs.getFloat("thWarn", d.warn.toFloat()).toDouble(),
+            lowV = prefs.getFloat("thLowV", d.lowV.toFloat()).toDouble(),
+            rpmMax = prefs.getFloat("thRpm", d.rpmMax.toFloat()).toDouble(),
+            fuelPrice = prefs.getFloat("fuelPrice", d.fuelPrice.toFloat()).toDouble(),
+        )
+        t.apply()
+        return t
+    }
+
+    fun setDriveNight(v: Boolean) {
+        driveNight.value = v
+        prefs.edit().putBoolean("driveNight", v).apply()
+    }
+
+    fun setGps(v: Boolean) {
+        gpsOn.value = v
+        prefs.edit().putBoolean("gpsOn", v).apply()
+        if (!v) gps.stop() else if (logger != null) gps.start()
+    }
+
+    fun dismissNewDtc() {
+        newDtc.value = emptyList()
     }
 
     fun setVoice(v: Boolean) {
@@ -261,7 +324,15 @@ class ObdSession private constructor(private val app: Application) {
             status.value = "Определение датчиков…"
             val sup = e.supportedPids()
             val active = Pids.ALL.filter { it.pid in sup }
-            supportedKeys.value = active.map { it.key }.toSet() + Pids.ADAPTER_V
+            val keys = active.map { it.key }.toMutableSet()
+            keys.add(Pids.ADAPTER_V)
+            if ("maf" in keys || ("load" in keys && "rpm" in keys)) {
+                keys.add(Pids.FUEL_LH)
+                if ("speed" in keys) keys.add(Pids.FUEL_L100)
+            }
+            supportedKeys.value = keys
+            status.value = "Проверка ошибок…"
+            checkNewDtcs(e)
             chargeMonitor.reset()
             chargeLow.value = false
             engineOnSince = null
@@ -346,9 +417,12 @@ class ObdSession private constructor(private val app: Application) {
                 continue
             }
             val map = HashMap(values.value)
+            // во время замера разгона опрашиваем только скорость — так точнее время
+            val fast = accelRun?.active == true
             for (p in active) {
                 if (pollPaused) break
-                if (!p.priority && cycle % 3L != 0L) continue
+                if (fast && p.key != "speed" && !(p.key == "coolant" && cycle % 10L == 0L)) continue
+                if (!fast && !p.priority && cycle % 3L != 0L) continue
                 val v = try {
                     e.readPid(p)
                 } catch (_: ElmTimeoutException) {
@@ -359,7 +433,7 @@ class ObdSession private constructor(private val app: Application) {
                     history.add(p.key, System.currentTimeMillis(), v)
                 }
             }
-            if (cycle % 5L == 0L && !pollPaused) {
+            if (!fast && cycle % 5L == 0L && !pollPaused) {
                 val av = try {
                     e.adapterVoltage()
                 } catch (_: ElmTimeoutException) {
@@ -371,14 +445,45 @@ class ObdSession private constructor(private val app: Application) {
                 }
             }
             val now = System.currentTimeMillis()
+            updateDerived(now, map)
             values.value = map
             analyze(now, map)
             val mark = pendingMark
             pendingMark = null
-            logger?.write(now, map, pendingFanFlag, mark)
+            logger?.let { l ->
+                val g = gps.freshValues(now)
+                l.write(now, if (g.isEmpty()) map else map + g, pendingFanFlag, mark)
+            }
             pendingFanFlag = false
             historyTick.value = now
             cycle++
+        }
+    }
+
+    /** Расход топлива по MAF и счётчики текущей поездки. */
+    private fun updateDerived(now: Long, map: HashMap<String, Double>) {
+        val dt = if (lastPollAt == 0L) 0.0 else ((now - lastPollAt) / 1000.0).coerceIn(0.0, 10.0)
+        lastPollAt = now
+        val rpm = map["rpm"]
+        val speed = map["speed"]
+        val maf = Fuel.airflow(map["maf"], map["load"], rpm)
+        val lh = if (maf != null && (rpm ?: 0.0) > 300) Fuel.litersPerHour(maf) else if (rpm != null && rpm < 300) 0.0 else null
+        if (lh != null) {
+            map[Pids.FUEL_LH] = lh
+            history.add(Pids.FUEL_LH, now, lh)
+            if (speed != null && speed > 3) {
+                val l100 = lh / speed * 100.0
+                map[Pids.FUEL_L100] = l100
+            } else {
+                map.remove(Pids.FUEL_L100)
+            }
+        }
+        val trip = liveTrip.value
+        if (trip != null && dt > 0) {
+            liveTrip.value = trip.copy(
+                distKm = trip.distKm + (speed ?: 0.0) * dt / 3600.0,
+                fuelL = trip.fuelL + (lh ?: 0.0) * dt / 3600.0,
+            )
         }
     }
 
@@ -395,11 +500,33 @@ class ObdSession private constructor(private val app: Application) {
                 lastAlarmAt = now
                 alert("Перегрев! Температура ${coolant.toInt()} градусов. Остановитесь и заглушите двигатель.", urgent = true)
             }
-            if (!warned100 && coolant >= 100 && !hot) {
+            if (!warned100 && coolant >= Thresholds.warn && !hot) {
                 warned100 = true
                 alert("Температура ${coolant.toInt()} градусов.", urgent = false)
             }
-            if (coolant < 97) warned100 = false
+            if (coolant < Thresholds.warn - 3) warned100 = false
+        }
+
+        // ---- Обороты ----
+        val rpmMax = Thresholds.rpmMax
+        if (rpmMax > 0 && rpm != null && rpm >= rpmMax && now - lastRpmAlertAt > 20_000) {
+            lastRpmAlertAt = now
+            alert("Обороты ${(rpm / 100).toInt() * 100}", urgent = false)
+        }
+
+        // ---- Замер разгона ----
+        accelRun?.let { run ->
+            val st = run.feed(now, map["speed"])
+            accel.value = st
+            if (st.phase == AccelPhase.DONE) {
+                accelRun = null
+                run.result(now)?.let { saveAccel(it) }
+                val words = listOfNotNull(
+                    st.t60?.let { "до шестидесяти ${speak(it)}" },
+                    st.t100?.let { "до ста ${speak(it)}" },
+                )
+                if (words.isNotEmpty()) alert("Разгон: ${words.joinToString(", ")}", urgent = false)
+            }
         }
 
         // ---- Вентиляторы ----
@@ -440,6 +567,30 @@ class ObdSession private constructor(private val app: Application) {
             warmup.value = st
             if (!st.running) warmupAnalyzer = null
         }
+    }
+
+    /** Сравнивает коды с прошлым подключением и сообщает о новых. */
+    private suspend fun checkNewDtcs(e: Elm327) {
+        val stored = try { e.readStoredDtcs() } catch (_: ElmTimeoutException) { return }
+        val pending = try { e.readDtcs(0x07) } catch (_: ElmTimeoutException) { emptyList() }
+        val now = System.currentTimeMillis()
+        dtcResult.value = DtcResult(stored, pending, emptyList(), now)
+        val current = (stored + pending).toSet()
+        val known = prefs.getString("knownDtcs", null)?.split(",")?.filter { it.isNotBlank() }?.toSet()
+        prefs.edit().putString("knownDtcs", current.joinToString(",")).apply()
+        // при самом первом подключении сравнивать не с чем
+        if (known == null) return
+        val fresh = (current - known).sorted()
+        if (fresh.isEmpty()) return
+        newDtc.value = fresh
+        addMarkInternal(now, "Новая ошибка: ${fresh.joinToString(" ")}", values.value["coolant"])
+        val spoken = fresh.joinToString(", ") { it.toCharArray().joinToString(" ") }
+        alert(if (fresh.size == 1) "Новая ошибка двигателя: $spoken" else "Новые ошибки двигателя: $spoken", urgent = false)
+    }
+
+    private fun rememberDtcs(r: DtcResult) {
+        prefs.edit().putString("knownDtcs", (r.stored + r.pending).toSet().joinToString(",")).apply()
+        newDtc.value = emptyList()
     }
 
     private fun alert(text: String, urgent: Boolean) {
@@ -545,6 +696,80 @@ class ObdSession private constructor(private val app: Application) {
                 false, "Готово", rest, min, charging, samples.toList(),
                 BatteryVerdict.make(rest, min, charging, lostLink),
             )
+        }
+    }
+
+    // ---------- Разгон ----------
+
+    fun startAccel() {
+        if (connState.value != ConnState.CONNECTED) {
+            accel.value = AccelState(AccelPhase.DONE, "Сначала подключитесь к адаптеру")
+            return
+        }
+        if ("speed" !in supportedKeys.value) {
+            accel.value = AccelState(AccelPhase.DONE, "Блок не отдаёт скорость")
+            return
+        }
+        val run = AccelRun()
+        accelRun = run
+        accel.value = run.feed(System.currentTimeMillis(), values.value["speed"])
+    }
+
+    fun cancelAccel() {
+        accelRun = null
+        accel.value = null
+    }
+
+    private fun speak(sec: Double): String = String.format(Locale("ru"), "%.1f", sec).replace(',', ' ') + " секунды"
+
+    private fun saveAccel(r: AccelResult) {
+        val list = (listOf(r) + accelHistory.value).take(20)
+        accelHistory.value = list
+        prefs.edit().putString("accelLog", list.joinToString(";") { it.encode() }).apply()
+    }
+
+    private fun loadAccelHistory(): List<AccelResult> =
+        prefs.getString("accelLog", null)?.split(";")?.mapNotNull { AccelResult.decode(it) } ?: emptyList()
+
+    fun clearAccelHistory() {
+        accelHistory.value = emptyList()
+        prefs.edit().remove("accelLog").apply()
+    }
+
+    // ---------- Пропуски зажигания ----------
+
+    fun readMisfires() {
+        val e = elm
+        if (e == null || connState.value != ConnState.CONNECTED) {
+            misfires.value = MisfireResult(null, "Сначала подключитесь к адаптеру", System.currentTimeMillis())
+            return
+        }
+        if (misfireBusy.value) return
+        scope.launch {
+            misfireBusy.value = true
+            pollPaused = true
+            delay(300)
+            try {
+                val counts = e.readMisfires()
+                val msg = when {
+                    counts == null -> "Блок не отдаёт счётчики пропусков по цилиндрам (Mode 06). " +
+                        "На японских Toyota это обычно так. Следите за кодами P0300–P0306 на вкладке «Ошибки»."
+                    counts.values.all { it == 0 } -> "Пропусков нет"
+                    else -> {
+                        val worst = counts.maxByOrNull { it.value }!!
+                        "Больше всего пропусков в цилиндре ${worst.key}: ${worst.value}. " +
+                            "Проверьте катушку и свечу этого цилиндра (можно переставить катушку на соседний и посмотреть, переедут ли пропуски)."
+                    }
+                }
+                misfires.value = MisfireResult(counts, msg, System.currentTimeMillis())
+            } catch (c: CancellationException) {
+                throw c
+            } catch (ex: Exception) {
+                misfires.value = MisfireResult(null, "Ошибка: ${ex.message}", System.currentTimeMillis())
+            } finally {
+                pollPaused = false
+                misfireBusy.value = false
+            }
         }
     }
 
@@ -734,10 +959,13 @@ class ObdSession private constructor(private val app: Application) {
         if (logger != null) return
         autoStartedRecording = false
         chargeMonitor.reset()
-        val keys = Pids.DISPLAY.map { it.key }
+        val useGps = gpsOn.value && gps.hasPermission()
+        val keys = Pids.DISPLAY.map { it.key } + (if (useGps) listOf("lat", "lon") else emptyList())
         val l = CsvLogger(logsDir(), keys)
         logger = l
         recordingFile.value = l.file
+        liveTrip.value = LiveTrip(System.currentTimeMillis())
+        if (useGps) gps.start()
     }
 
     private fun stopRecordingInternal() {
@@ -745,6 +973,8 @@ class ObdSession private constructor(private val app: Application) {
         logger = null
         autoStartedRecording = false
         l.close()
+        gps.stop()
+        liveTrip.value = null
         recordingFile.value = null
         refreshLogs()
     }
@@ -771,7 +1001,9 @@ class ObdSession private constructor(private val app: Application) {
         } catch (_: Exception) {
             emptyList()
         }
-        dtcResult.value = DtcResult(stored, pending, permanent, System.currentTimeMillis())
+        val r = DtcResult(stored, pending, permanent, System.currentTimeMillis())
+        dtcResult.value = r
+        rememberDtcs(r)
         dtcMessage.value = if (stored.isEmpty() && pending.isEmpty() && permanent.isEmpty()) "Ошибок нет" else null
     }
 
@@ -783,6 +1015,7 @@ class ObdSession private constructor(private val app: Application) {
 
     fun clearDtc() = dtcOp { e ->
         val ok = e.clearDtcs()
+        if (ok) rememberDtcs(DtcResult(emptyList(), emptyList(), emptyList(), 0))
         dtcResult.value = null
         freezeFrame.value = null
         dtcMessage.value = if (ok) "Ошибки стёрты" else "Блок не подтвердил стирание"

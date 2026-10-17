@@ -185,6 +185,52 @@ class Elm327(private val t: Transport, private val log: (String) -> Unit) {
         return r3.contains("54")
     }
 
+    /**
+     * Пропуски зажигания по цилиндрам из результатов бортовых тестов (Mode 06, MID A2–A7).
+     * Возвращает номер цилиндра → число пропусков; null — блок эти данные не отдаёт.
+     */
+    suspend fun readMisfires(): Map<Int, Int>? {
+        val out = LinkedHashMap<Int, Int>()
+        for (cyl in 1..6) {
+            val mid = 0xA1 + cyl
+            val r = try {
+                send(String.format(Locale.US, "06%02X", mid), 3000)
+            } catch (_: ElmTimeoutException) {
+                continue
+            }
+            val hex = joinFrames(r)
+            val marker = String.format(Locale.US, "46%02X", mid)
+            val idx = hex.indexOf(marker)
+            if (idx < 0 || idx % 2 != 0) continue
+            // записи по 9 байт: MID, TID, UASID, значение(2), мин(2), макс(2)
+            val bytes = Pids.hexBytes(hex.substring(idx + 2))
+            var current: Int? = null
+            var average: Int? = null
+            var i = 0
+            while (i + 8 < bytes.size) {
+                if (bytes[i] != mid) break
+                val tid = bytes[i + 1]
+                val v = bytes[i + 3] * 256 + bytes[i + 4]
+                if (tid == 0x0C) current = v
+                if (tid == 0x0B) average = v
+                i += 9
+            }
+            (current ?: average)?.let { out[cyl] = it }
+        }
+        return out.ifEmpty { null }
+    }
+
+    /** Склеивает многокадровый ответ CAN в одну hex-строку без номеров кадров. */
+    private fun joinFrames(r: String): String {
+        val sb = StringBuilder()
+        for (raw in r.lines()) {
+            val l = raw.replace(" ", "").trim().uppercase(Locale.US)
+            if (l.isEmpty() || l.length == 3 && l.all { it.isLetterOrDigit() } && !l.contains(':')) continue
+            sb.append(l.substringAfter(':'))
+        }
+        return sb.toString()
+    }
+
     suspend fun readFreezeFrame(): FreezeFrame {
         val fm = freezeMode
         val r = send(String.format(Locale.US, "%02X0200", fm), 3000)

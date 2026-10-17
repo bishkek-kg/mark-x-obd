@@ -223,6 +223,7 @@ private fun TopStatus(vm: ObdSession) {
             )
         }
     }
+    NewDtcBanner(vm)
     if (chargeLow) {
         Surface(color = MaterialTheme.colorScheme.tertiaryContainer, modifier = Modifier.fillMaxWidth()) {
             Text(
@@ -264,6 +265,11 @@ private fun ConnectScreen(vm: ObdSession) {
     val autoReconnect by vm.autoReconnect.collectAsState()
     val autoRecord by vm.autoRecord.collectAsState()
     val voiceOn by vm.voiceOn.collectAsState()
+    val gpsOn by vm.gpsOn.collectAsState()
+    val ctx = LocalContext.current
+    val locLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        if (ok) vm.setGps(true) else android.widget.Toast.makeText(ctx, "Без доступа к местоположению карта не пишется", android.widget.Toast.LENGTH_LONG).show()
+    }
 
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (!btOn) {
@@ -308,12 +314,16 @@ private fun ConnectScreen(vm: ObdSession) {
                     SwitchRow("Автозапись по двигателю", "Запись начинается при запуске двигателя и сохраняется, когда он заглушён", autoRecord) {
                         vm.setAutoRecord(it)
                     }
-                    SwitchRow("Голосовые предупреждения", "Перегрев, 100 °C, генератор не заряжает. Без русского голоса — звуковой сигнал", voiceOn) {
+                    SwitchRow("Голосовые предупреждения", "Перегрев, высокая температура, генератор, обороты, новые ошибки. Без русского голоса — звуковой сигнал", voiceOn) {
                         vm.setVoice(it)
+                    }
+                    SwitchRow("Записывать GPS", "Маршрут для карты поездки с цветом по температуре. Включите до подключения к адаптеру", gpsOn) { on ->
+                        if (on && !vm.gps.hasPermission()) locLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION) else vm.setGps(on)
                     }
                 }
             }
         }
+        item { ThresholdsCard(vm) }
         item {
             Text(
                 "Сначала спарьте адаптер в настройках Bluetooth телефона (обычно называется V-LINK, PIN 1234 или 0000). " +
@@ -400,6 +410,7 @@ private fun DashboardScreen(vm: ObdSession, onDrive: () -> Unit) {
             Spacer(Modifier.weight(1f))
             RecordButton(rec != null, connState == ConnState.CONNECTED) { vm.toggleRecording() }
         }
+        LiveTripLine(vm)
         MarksBar(vm, Modifier.padding(horizontal = 12.dp))
         Text(
             "Нажмите на плитку, чтобы добавить или убрать её из графиков",
@@ -416,7 +427,7 @@ private fun DashboardScreen(vm: ObdSession, onDrive: () -> Unit) {
                 val v = values[p.key]
                 val container = when {
                     p.key == "coolant" && v != null && v >= Pids.OVERHEAT_C -> MaterialTheme.colorScheme.errorContainer
-                    p.key == "coolant" && v != null && v >= 100.0 -> MaterialTheme.colorScheme.tertiaryContainer
+                    p.key == "coolant" && v != null && v >= Thresholds.warn -> MaterialTheme.colorScheme.tertiaryContainer
                     else -> MaterialTheme.colorScheme.surfaceVariant
                 }
                 Card(
@@ -508,15 +519,30 @@ private fun DriveScreen(vm: ObdSession, onExit: () -> Unit) {
     val chargeLow by vm.chargeLow.collectAsState()
     val rec by vm.recordingFile.collectAsState()
     val marks by vm.marks.collectAsState()
+    val night by vm.driveNight.collectAsState()
     val coolant = values["coolant"]
     val volt = values["ecuV"] ?: values[Pids.ADAPTER_V]
+    val warn = Thresholds.warn
+    // ночью фон чёрный, а цвет состояния переходит на цифру температуры — меньше слепит
+    val stateColor = when {
+        coolant == null -> Color(0xFF90A4AE)
+        coolant >= Pids.OVERHEAT_C -> Color(0xFFFF5252)
+        coolant >= warn -> Color(0xFFFFC107)
+        else -> Color(0xFF66BB6A)
+    }
     val bg = when {
+        night && !(coolant != null && coolant >= Pids.OVERHEAT_C) -> Color.Black
         coolant == null -> Color(0xFF263238)
         coolant >= Pids.OVERHEAT_C -> Color(0xFFB71C1C)
-        coolant >= 100 -> Color(0xFFE6A100)
+        coolant >= warn -> Color(0xFFE6A100)
         else -> Color(0xFF1B5E20)
     }
-    val fg = if (coolant != null && coolant >= 100 && coolant < Pids.OVERHEAT_C) Color.Black else Color.White
+    val fg = when {
+        night && bg == Color.Black -> Color(0xFFB0BEC5)
+        coolant != null && coolant >= warn && coolant < Pids.OVERHEAT_C -> Color.Black
+        else -> Color.White
+    }
+    val bigColor = if (night && bg == Color.Black) stateColor else fg
     val timeFmt = remember { SimpleDateFormat("HH:mm", Locale.US) }
     Surface(color = bg, modifier = Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().padding(16.dp)) {
@@ -529,13 +555,15 @@ private fun DriveScreen(vm: ObdSession, onExit: () -> Unit) {
                     color = fg,
                     modifier = Modifier.weight(1f),
                 )
+                TextButton(onClick = { vm.setDriveNight(!night) }) { Text(if (night) "☀ день" else "☾ ночь", color = fg) }
                 Button(onClick = onExit) { Text("Выйти") }
             }
+            LiveTripLine(vm, color = fg, big = true)
             Spacer(Modifier.weight(1f))
             Text("Температура ОЖ", color = fg, fontSize = 18.sp)
             Text(
                 coolant?.let { "${it.toInt()}°" } ?: "—",
-                color = fg,
+                color = bigColor,
                 fontSize = 120.sp,
                 fontWeight = FontWeight.Bold,
             )
@@ -561,14 +589,18 @@ private fun DriveScreen(vm: ObdSession, onExit: () -> Unit) {
                 }
             }
             Spacer(Modifier.weight(1f))
-            Surface(color = Color.White.copy(alpha = 0.92f), shape = MaterialTheme.shapes.medium) {
+            Surface(
+                color = if (night) Color(0xFF1C1C1C) else Color.White.copy(alpha = 0.92f),
+                contentColor = if (night) Color(0xFFB0BEC5) else Color.Black,
+                shape = MaterialTheme.shapes.medium,
+            ) {
                 Column(Modifier.padding(10.dp)) {
                     MarksBar(vm, big = true)
                     marks.firstOrNull()?.let { m ->
                         Text(
                             "Последняя: ${timeFmt.format(Date(m.time))} — ${m.label}",
                             style = MaterialTheme.typography.bodySmall,
-                            color = Color.Black,
+                            color = if (night) Color(0xFFB0BEC5) else Color.Black,
                         )
                     }
                 }
@@ -853,7 +885,10 @@ private fun LogsScreen(vm: ObdSession) {
     var expanded by remember { mutableStateOf<String?>(null) }
     var selected by remember { mutableStateOf<List<String>>(emptyList()) }
     var busy by remember { mutableStateOf<String?>(null) }
+    var showTrends by remember { mutableStateOf(false) }
+    var mapFile by remember { mutableStateOf<File?>(null) }
     LaunchedEffect(Unit) { vm.refreshLogs() }
+    mapFile?.let { TripMapDialog(it) { mapFile = null } }
 
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item {
@@ -864,6 +899,13 @@ private fun LogsScreen(vm: ObdSession) {
                     modifier = Modifier.weight(1f),
                 )
                 RecordButton(rec != null, connState == ConnState.CONNECTED) { vm.toggleRecording() }
+            }
+        }
+        item(key = "trends") {
+            if (showTrends) {
+                TrendsCard(files.filter { it != rec }) { showTrends = false }
+            } else {
+                OutlinedButton(onClick = { showTrends = true }) { Text("Тренды по всем поездкам") }
             }
         }
         if (selected.size == 2) {
@@ -921,6 +963,7 @@ private fun LogsScreen(vm: ObdSession) {
                                     }
                                 },
                             ) { Text("Отчёт PDF") }
+                            TextButton(onClick = { mapFile = f }) { Text("Карта") }
                         }
                     }
                     Row {
@@ -984,6 +1027,10 @@ private fun CompareCard(a: File, b: File, onClose: () -> Unit) {
                 "«Полка» термостата, °C" to (n0(sa.plateau) to n0(sb.plateau)),
                 "Мин. напряжение, В" to (n1(sa.minV) to n1(sb.minV)),
                 "Без зарядки, мин" to (n1(sa.chargeLowMin) to n1(sb.chargeLowMin)),
+                "Топливо, л" to (n1(sa.fuelL) to n1(sb.fuelL)),
+                "Расход, л/100 км" to (n1(sa.avgL100) to n1(sb.avgL100)),
+                "Стиль, баллы" to (sa.styleScore.toString() to sb.styleScore.toString()),
+                "Холостые прогретого" to (n0(sa.warmIdleRpm) to n0(sb.warmIdleRpm)),
             )
             rows.forEach { (label, pair) ->
                 Row {
@@ -998,7 +1045,13 @@ private fun CompareCard(a: File, b: File, onClose: () -> Unit) {
 
 /** Несколько рядов (минуты от начала, значение) на одном графике. */
 @Composable
-private fun MultiChart(series: List<Pair<List<Pair<Float, Float>>, Color>>, danger: Float?, low: Float? = null) {
+fun MultiChart(
+    series: List<Pair<List<Pair<Float, Float>>, Color>>,
+    danger: Float?,
+    low: Float? = null,
+    xUnit: String = "мин",
+    connectDots: Boolean = false,
+) {
     val gridColor = MaterialTheme.colorScheme.outlineVariant
     val textColor = MaterialTheme.colorScheme.onSurfaceVariant
     val dangerColor = MaterialTheme.colorScheme.error
@@ -1049,10 +1102,17 @@ private fun MultiChart(series: List<Pair<List<Pair<Float, Float>>, Color>>, dang
             val path = Path()
             pts.forEachIndexed { i, (m, v) -> if (i == 0) path.moveTo(x(m), y(v)) else path.lineTo(x(m), y(v)) }
             drawPath(path, color, style = Stroke(width = 2.dp.toPx()))
+            if (connectDots) pts.forEach { (m, v) -> drawCircle(color, 3.dp.toPx(), Offset(x(m), y(v))) }
         }
-        native.drawText("0 мин", left, size.height - 2f, paint)
-        paint.textAlign = android.graphics.Paint.Align.RIGHT
-        native.drawText(String.format(Locale.US, "%.0f мин", maxX), right, size.height - 2f, paint)
+        if (xUnit == "мин") {
+            native.drawText("0 мин", left, size.height - 2f, paint)
+            paint.textAlign = android.graphics.Paint.Align.RIGHT
+            native.drawText(String.format(Locale.US, "%.0f мин", maxX), right, size.height - 2f, paint)
+        } else {
+            native.drawText("$xUnit 1", left, size.height - 2f, paint)
+            paint.textAlign = android.graphics.Paint.Align.RIGHT
+            native.drawText(String.format(Locale.US, "$xUnit %.0f", maxX), right, size.height - 2f, paint)
+        }
     }
 }
 
@@ -1239,6 +1299,8 @@ private fun TestsScreen(vm: ObdSession) {
                 }
             }
         }
+        item { AccelCard(vm, connected) }
+        item { MisfireCard(vm, connected) }
         // ----- Исследование Toyota -----
         item {
             Card(Modifier.fillMaxWidth()) {

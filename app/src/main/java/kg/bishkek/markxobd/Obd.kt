@@ -25,9 +25,37 @@ private fun IntArray.word(): Int? {
     return a * 256 + c
 }
 
+/** Пороги предупреждений и цена топлива — настраиваются на вкладке «Связь». */
+object Thresholds {
+    @Volatile var overheat = 105.0
+    @Volatile var warn = 100.0
+    @Volatile var lowV = 13.0
+    /** 0 — предупреждение по оборотам выключено. */
+    @Volatile var rpmMax = 0.0
+    /** Цена литра бензина, сом. 0 — стоимость не считать. */
+    @Volatile var fuelPrice = 0.0
+}
+
+/** Расход топлива по MAF: стехиометрия 14,7 и плотность бензина 745 г/л. Без лямбд — оценка. */
+object Fuel {
+    fun litersPerHour(mafGs: Double): Double = mafGs * 3600.0 / (14.7 * 745.0)
+
+    /**
+     * Расход воздуха из расчётной нагрузки, когда блок не отдаёт MAF.
+     * 4GR-FSE: 2,494 л; плотность воздуха 1,184 г/л. Поправка 1,02 подобрана по записям этой машины,
+     * где были и MAF, и нагрузка (медиана отношения 1,02, разброс 0,8–1,35 в переходах).
+     */
+    fun mafFromLoad(loadPct: Double, rpm: Double): Double = loadPct / 100.0 * rpm / 120.0 * 2.494 * 1.184 * 1.02
+
+    fun airflow(maf: Double?, load: Double?, rpm: Double?): Double? =
+        maf ?: if (load != null && rpm != null) mafFromLoad(load, rpm) else null
+}
+
 object Pids {
     const val ADAPTER_V = "adapterV"
-    const val OVERHEAT_C = 105.0
+    const val FUEL_LH = "fuelLh"
+    const val FUEL_L100 = "fuelL100"
+    val OVERHEAT_C: Double get() = Thresholds.overheat
 
     val ALL: List<PidDef> = listOf(
         PidDef("coolant", 0x05, "Температура ОЖ", "°C", 0, true) { d -> d.b(0)?.let { it - 40.0 } },
@@ -53,7 +81,13 @@ object Pids {
 
     val ADAPTER = PidDef(ADAPTER_V, -1, "Напряжение адаптера", "В", 1, false) { null }
 
-    val DISPLAY: List<PidDef> = ALL + ADAPTER
+    /** Расчётные параметры: не опрашиваются, считаются из других (pid = -2). */
+    val DERIVED: List<PidDef> = listOf(
+        PidDef(FUEL_LH, -2, "Расход топлива", "л/ч", 1, false) { null },
+        PidDef(FUEL_L100, -2, "Расход на 100 км", "л/100км", 1, false) { null },
+    )
+
+    val DISPLAY: List<PidDef> = ALL + ADAPTER + DERIVED
 
     /** Параметры, которые читаем в стоп-кадре (Mode 02). */
     val FREEZE_PIDS = setOf(0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x42)
@@ -248,6 +282,7 @@ class History(private val maxAgeMs: Long) {
 
 /** Запись поездки в CSV. */
 class CsvLogger(dir: File, private val keys: List<String>) {
+    private val precise = setOf("lat", "lon")
     val file: File
     private val writer: BufferedWriter
     private val start = System.currentTimeMillis()
@@ -268,7 +303,7 @@ class CsvLogger(dir: File, private val keys: List<String>) {
         sb.append(',').append(String.format(Locale.US, "%.1f", (now - start) / 1000.0))
         for (k in keys) {
             sb.append(',')
-            values[k]?.let { sb.append(String.format(Locale.US, "%.3f", it)) }
+            values[k]?.let { sb.append(String.format(Locale.US, if (k in precise) "%.6f" else "%.3f", it)) }
         }
         sb.append(',').append(if (fanEvent) "1" else "")
         sb.append(',')

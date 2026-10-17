@@ -64,4 +64,6 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.6")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    // карта поездки — OpenStreetMap, без ключей и сервисов Google
+    implementation("org.osmdroid:osmdroid-android:6.1.18")
 }

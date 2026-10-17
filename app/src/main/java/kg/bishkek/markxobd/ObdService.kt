@@ -1,6 +1,8 @@
 package kg.bishkek.markxobd
 
+import android.Manifest
 import android.annotation.SuppressLint
+import android.content.pm.PackageManager
 import android.app.Application
 import android.app.Notification
 import android.app.NotificationChannel
@@ -62,7 +64,13 @@ class ObdService : Service() {
     override fun onCreate() {
         super.onCreate()
         createChannels()
-        val type = if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE else 0
+        var type = if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE else 0
+        // тип «местоположение» нужен, чтобы GPS писался при выключенном экране; без разрешения его указывать нельзя
+        if (Build.VERSION.SDK_INT >= 29 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        ) {
+            type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+        }
         try {
             ServiceCompat.startForeground(this, NOTIF_ID, buildStatus("Подключение…"), type)
         } catch (_: Exception) {
@@ -101,6 +109,18 @@ class ObdService : Service() {
             }
             else -> parts.add(s.status.value)
         }
+        val volt = v["ecuV"] ?: v[Pids.ADAPTER_V]
+        val connected = s.connState.value == ConnState.CONNECTED
+        ObdWidget.push(
+            this,
+            if (connected) v["coolant"] else null,
+            if (connected) volt else null,
+            when {
+                !connected -> "Нет связи"
+                s.recordingFile.value != null -> "Идёт запись"
+                else -> "На связи"
+            },
+        )
         if (s.recordingFile.value != null) parts.add("запись")
         if (s.warmup.value?.running == true) parts.add("тест прогрева")
         val nm = getSystemService(NotificationManager::class.java)
@@ -156,6 +176,7 @@ class ObdService : Service() {
 
     override fun onDestroy() {
         scope.cancel()
+        ObdWidget.push(this, null, null, "Нет связи")
         try {
             wakeLock?.let { if (it.isHeld) it.release() }
         } catch (_: Exception) {

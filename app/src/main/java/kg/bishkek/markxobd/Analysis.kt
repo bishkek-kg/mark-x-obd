@@ -10,6 +10,9 @@ private fun a2(v: Double) = String.format(Locale.US, "%.2f", v)
 /** Порог, ниже которого на работающем двигателе генератор считается не заряжающим. */
 const val CHARGE_LOW_V = 13.0
 
+/** Ниже этой температуры включения вентиляторов не ищем. */
+const val FAN_MIN_COOLANT = 60.0
+
 // ======================= Термостат =======================
 
 /**
@@ -78,7 +81,9 @@ class ThermostatDetector {
 /**
  * Включение вентиляторов радиатора по ступенчатой просадке напряжения.
  * Чтобы не путать с газовкой и сменой холостых: обороты должны быть ровными,
- * а ОЖ — не ниже 85 °C (без кондиционера вентиляторы раньше не включаются).
+ * а напряжение после ступеньки — не ниже 13 В. Ниже 60 °C не ищем: на холодном двигателе
+ * ступеньки дают переходы холостых. Включение заметно раньше 90 °C — само по себе находка
+ * (кондиционер, режим обдува стекла или неисправность управления вентиляторами).
  */
 class FanDetector {
     private data class S(val t: Long, val v: Double, val rpm: Double)
@@ -92,7 +97,7 @@ class FanDetector {
         if (v == null || rpm == null) return false
         buf.addLast(S(t, v, rpm))
         while (buf.isNotEmpty() && t - buf.first().t > 15_000) buf.removeFirst()
-        if (coolant == null || coolant < 85 || rpm < 400) return false
+        if (coolant == null || coolant < FAN_MIN_COOLANT || rpm < 400) return false
         if (t - lastAt < 30_000) return false
         val before = buf.filter { it.t in (t - 12_000)..(t - 4_000) }
         val after = buf.filter { it.t > t - 3_000 }

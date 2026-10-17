@@ -646,7 +646,7 @@ private fun ChartsScreen(vm: ObdSession) {
                 Column(Modifier.padding(12.dp)) {
                     Text("Вероятные включения вентиляторов", fontWeight = FontWeight.Medium)
                     Text(
-                        "Определяются по ступенчатой просадке напряжения при ровных оборотах и ОЖ выше 85 °C. Это ориентир — сверяйте на слух и ставьте метку «Вентилятор».",
+                        "Определяются по ступенчатой просадке напряжения при ровных оборотах и ОЖ выше 60 °C. Это ориентир — сверяйте на слух и ставьте метку «Вентилятор».",
                         style = MaterialTheme.typography.bodySmall,
                     )
                     Spacer(Modifier.height(6.dp))

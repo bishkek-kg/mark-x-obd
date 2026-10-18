@@ -85,6 +85,9 @@ class ObdSession private constructor(private val app: Application) {
     val driveNight = MutableStateFlow(prefs.getBoolean("driveNight", true))
     val gpsOn = MutableStateFlow(prefs.getBoolean("gpsOn", false))
     val gps = GpsTracker(app)
+    val fuelTank = MutableStateFlow(FuelTank.decode(prefs.getString("fuelTank", null)))
+    private var fuelSavedAt = 0L
+    private var lowFuelWarned = false
     @Volatile
     private var accelRun: AccelRun? = null
     private var lastRpmAlertAt = 0L
@@ -189,6 +192,23 @@ class ObdSession private constructor(private val app: Application) {
         gpsOn.value = v
         prefs.edit().putBoolean("gpsOn", v).apply()
         if (!v) gps.stop() else if (logger != null) gps.start()
+    }
+
+    fun refuel(liters: Double, full: Boolean) {
+        val t = fuelTank.value.refuel(liters, full, System.currentTimeMillis())
+        fuelTank.value = t
+        lowFuelWarned = false
+        saveFuel()
+    }
+
+    fun setTankSize(l: Double) {
+        fuelTank.value = fuelTank.value.copy(tankL = l.coerceIn(30.0, 120.0))
+        saveFuel()
+    }
+
+    private fun saveFuel() {
+        fuelSavedAt = System.currentTimeMillis()
+        prefs.edit().putString("fuelTank", fuelTank.value.encode()).apply()
     }
 
     fun dismissNewDtc() {
@@ -351,6 +371,8 @@ class ObdSession private constructor(private val app: Application) {
         } finally {
             elm = null
             pollPaused = false
+            saveFuel()
+            lastPollAt = 0L
             try {
                 transport?.close()
             } catch (_: Exception) {
@@ -476,6 +498,16 @@ class ObdSession private constructor(private val app: Application) {
                 map[Pids.FUEL_L100] = l100
             } else {
                 map.remove(Pids.FUEL_L100)
+            }
+        }
+        if (dt > 0) {
+            val km = (speed ?: 0.0) * dt / 3600.0
+            val tank = fuelTank.value.consume((lh ?: 0.0) * dt / 3600.0, km)
+            fuelTank.value = tank
+            if (now - fuelSavedAt > 30_000) saveFuel()
+            if (tank.known && tank.levelL < 8 && !lowFuelWarned) {
+                lowFuelWarned = true
+                alert("Топлива осталось примерно ${tank.levelL.toInt()} литров", urgent = false)
             }
         }
         val trip = liveTrip.value
@@ -853,9 +885,86 @@ class ObdSession private constructor(private val app: Application) {
             val r = q(cmd, 1500) ?: continue
             if (ok(r) && !r.replace(" ", "").contains("7F22")) addResearch("> $cmd\n$r")
         }
-        q("ATSH7DF")
-        q("ATH0")
+        e.restoreHeader()
         addResearch("=== Готово. Ответили идентификаторов Mode 21: $found ===")
+        saveResearch()
+    }
+
+    /** Блоки в сети CAN, к которым можно обратиться через ELM327 (запрос → ответ). */
+    private val modules = listOf(
+        Triple("Двигатель (параметры 40–7F)", "7E0", "7E8"),
+        Triple("Коробка передач", "7E1", "7E9"),
+        Triple("ABS / VSC", "7B0", "7B8"),
+        Triple("Электроусилитель руля", "7A1", "7A9"),
+        Triple("Подушки безопасности", "780", "788"),
+        Triple("Щиток приборов", "7C0", "7C8"),
+        Triple("Климат", "7C4", "7CC"),
+        Triple("Шлюз / кузов", "750", "758"),
+    )
+
+    @Volatile
+    private var scanCancel = false
+
+    fun cancelScan() {
+        scanCancel = true
+    }
+
+    /**
+     * Ищет блоки в сети CAN и перебирает их идентификаторы Mode 21.
+     * Только чтение: запросы данных, идентификации и кодов ошибок.
+     */
+    fun scanModules() = researchOp { e ->
+        scanCancel = false
+        addResearch("=== Поиск блоков ===")
+        fun ok(r: String) = r.isNotBlank() && !r.contains("NO DATA") && !r.contains("NODATA") &&
+            !r.contains("?") && !r.contains("ERROR") && !r.contains("STOPPED")
+        suspend fun q(cmd: String, timeout: Long = 1500): String? = try {
+            e.send(cmd, timeout)
+        } catch (_: ElmTimeoutException) {
+            null
+        }
+        q("ATH1")
+        var alive = 0
+        try {
+            for ((name, tx, rx) in modules) {
+                if (scanCancel) break
+                q("ATSH$tx")
+                q("ATCRA$rx")
+                val engine = tx == "7E0"
+                addResearch("--- $name ($tx → $rx) ---")
+                // жив ли блок: идентификация, коды, первый идентификатор
+                var answered = engine
+                for (cmd in listOf("1A87", "1A9B", "2101", "13", "3E00")) {
+                    val r = q(cmd) ?: continue
+                    if (ok(r)) {
+                        answered = true
+                        addResearch("> $cmd\n$r")
+                    }
+                }
+                if (!answered) {
+                    addResearch("не отвечает")
+                    continue
+                }
+                alive++
+                val range = if (engine) 0x40..0x7F else 0x01..0xFF
+                var found = 0
+                for (id in range) {
+                    if (scanCancel) break
+                    if (id % 16 == 0) status.value = "Поиск блоков: $name, 21%02X…".format(id)
+                    val cmd = String.format(Locale.US, "21%02X", id)
+                    val r = q(cmd) ?: continue
+                    if (ok(r) && !r.replace(" ", "").contains("7F21")) {
+                        found++
+                        addResearch("> $cmd\n$r")
+                    }
+                }
+                addResearch("ответили идентификаторов: $found")
+            }
+        } finally {
+            e.restoreHeader()
+            status.value = "Подключено · ${e.protocolName}"
+        }
+        addResearch(if (scanCancel) "=== Остановлено ===" else "=== Готово. Ответили блоков: $alive ===")
         saveResearch()
     }
 

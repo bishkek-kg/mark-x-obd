@@ -424,3 +424,87 @@ fun TripMapDialog(file: File, onClose: () -> Unit) {
         }
     }
 }
+
+// ---------------- Топливо ----------------
+
+@Composable
+fun FuelLine(vm: ObdSession, color: Color = Color.Unspecified, big: Boolean = false) {
+    val t by vm.fuelTank.collectAsState()
+    if (!t.known) return
+    Text(
+        "Бак ≈ ${n0(t.levelL)} л · запас ≈ ${n0(t.rangeKm)} км",
+        color = if (t.levelL < 8) Color(0xFFFFB300) else color,
+        fontSize = if (big) 18.sp else 13.sp,
+    )
+}
+
+@Composable
+fun FuelCard(vm: ObdSession) {
+    val t by vm.fuelTank.collectAsState()
+    var show by remember { mutableStateOf(false) }
+    Card(Modifier.fillMaxWidth()) {
+        Row(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                if (t.known) {
+                    Text("Топливо ≈ ${n0(t.levelL)} из ${n0(t.tankL)} л · запас ≈ ${n0(t.rangeKm)} км", fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                    Text(
+                        "С заправки ${n0(t.sinceKm)} км, ≈ ${n1(t.sinceRawL * t.factor)} л" +
+                            (t.lastRealL100?.let { " · реальный расход ${n1(it)} л/100" } ?: "") +
+                            " · оценка",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                } else {
+                    Text("Учёт топлива", fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                    Text("Заправьтесь до полного и отметьте — дальше остаток считается сам", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            OutlinedButton(onClick = { show = true }) { Text("Заправка") }
+        }
+    }
+    if (show) RefuelDialog(vm, t) { show = false }
+}
+
+@Composable
+private fun RefuelDialog(vm: ObdSession, t: FuelTank, onClose: () -> Unit) {
+    var liters by remember { mutableStateOf("") }
+    var full by remember { mutableStateOf(true) }
+    var tank by remember { mutableStateOf(n0(t.tankL)) }
+    fun num(s: String) = s.trim().replace(',', '.').toDoubleOrNull()
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onClose,
+        title = { Text("Заправка") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = liters, onValueChange = { liters = it }, singleLine = true,
+                    label = { Text("Сколько залили, л") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    androidx.compose.material3.Checkbox(checked = full, onCheckedChange = { full = it })
+                    Text("До полного бака (до щелчка пистолета)")
+                }
+                Text(
+                    "Две заправки до полного подряд уточняют расчёт: приложение сравнит свой счёт с реально залитыми литрами.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                OutlinedTextField(
+                    value = tank, onValueChange = { tank = it }, singleLine = true,
+                    label = { Text("Объём бака, л (Mark X — 71)") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = num(liters) != null || full,
+                onClick = {
+                    num(tank)?.let { if (it != t.tankL) vm.setTankSize(it) }
+                    vm.refuel(num(liters) ?: 0.0, full)
+                    onClose()
+                },
+            ) { Text("Сохранить") }
+        },
+        dismissButton = { TextButton(onClick = onClose) { Text("Отмена") } },
+    )
+}

@@ -122,3 +122,73 @@ class AccelRun {
 }
 
 fun secs(v: Double?): String = v?.let { String.format(Locale.US, "%.1f с", it) } ?: "—"
+
+/**
+ * Учёт топлива по заправкам. Блок двигателя уровень в баке не отдаёт,
+ * поэтому остаток считается: от заправки вычитается расход по MAF/нагрузке.
+ * Заправки «до полного» подряд уточняют поправочный коэффициент расчёта.
+ */
+data class FuelTank(
+    val known: Boolean = false,
+    val levelL: Double = 0.0,
+    val tankL: Double = 71.0,
+    val factor: Double = 1.0,
+    /** с последней заправки: км и литры по расчёту (без поправки) */
+    val sinceKm: Double = 0.0,
+    val sinceRawL: Double = 0.0,
+    val lastFull: Boolean = false,
+    val lastRefuelAt: Long = 0L,
+    val lastRealL100: Double? = null,
+) {
+    val avgL100: Double
+        get() = when {
+            sinceKm >= 20 && sinceRawL > 0 -> sinceRawL * factor / sinceKm * 100
+            lastRealL100 != null -> lastRealL100
+            else -> 11.0
+        }
+    val rangeKm: Double get() = if (known) levelL / avgL100 * 100 else 0.0
+
+    fun consume(rawL: Double, km: Double): FuelTank = copy(
+        levelL = if (known) (levelL - rawL * factor).coerceAtLeast(0.0) else levelL,
+        sinceKm = sinceKm + km,
+        sinceRawL = sinceRawL + rawL,
+    )
+
+    fun refuel(liters: Double, full: Boolean, now: Long): FuelTank {
+        var f = factor
+        var real: Double? = lastRealL100
+        // полный → полный: залитые литры = реально сожжённые с прошлой заправки
+        if (full && lastFull && sinceRawL >= 8) {
+            val k = (liters / sinceRawL).coerceIn(0.7, 1.4)
+            f = (factor + k) / 2
+            if (sinceKm >= 20) real = liters / sinceKm * 100
+        }
+        return copy(
+            known = full || known,
+            levelL = if (full) tankL else (levelL + liters).coerceAtMost(tankL),
+            factor = f,
+            sinceKm = 0.0,
+            sinceRawL = 0.0,
+            lastFull = full,
+            lastRefuelAt = now,
+            lastRealL100 = real,
+        )
+    }
+
+    fun encode(): String = listOf(known, levelL, tankL, factor, sinceKm, sinceRawL, lastFull, lastRefuelAt, lastRealL100 ?: "").joinToString("|")
+
+    companion object {
+        fun decode(s: String?): FuelTank {
+            val p = s?.split("|") ?: return FuelTank()
+            if (p.size < 9) return FuelTank()
+            return try {
+                FuelTank(
+                    p[0].toBoolean(), p[1].toDouble(), p[2].toDouble(), p[3].toDouble(), p[4].toDouble(),
+                    p[5].toDouble(), p[6].toBoolean(), p[7].toLong(), p[8].toDoubleOrNull(),
+                )
+            } catch (_: Exception) {
+                FuelTank()
+            }
+        }
+    }
+}

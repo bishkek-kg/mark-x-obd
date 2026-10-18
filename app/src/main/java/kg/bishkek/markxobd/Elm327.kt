@@ -26,6 +26,17 @@ class Elm327(private val t: Transport, private val log: (String) -> Unit) {
 
     val protocolName: String get() = if (pidMode == 0x21) "Toyota JOBD" else "OBD2"
 
+    /** Блок двигателя отвечает только на адресные запросы 7E0 (а не на общий 7DF). */
+    var addressed: Boolean = false
+        private set
+
+    /** Вернуть рабочий заголовок после экспериментов с другими блоками. */
+    suspend fun restoreHeader() {
+        try { send(if (addressed) "ATSH7E0" else "ATSH7DF", 1500) } catch (_: ElmTimeoutException) {}
+        try { send("ATCRA", 1500) } catch (_: ElmTimeoutException) {}
+        try { send("ATH0", 1500) } catch (_: ElmTimeoutException) {}
+    }
+
     suspend fun send(cmd: String, timeoutMs: Long = 3000): String = mutex.withLock {
         // выбрасываем «хвосты» от предыдущих ответов
         while (true) {
@@ -89,6 +100,7 @@ class Elm327(private val t: Transport, private val log: (String) -> Unit) {
                 send("ATSH7DF")
                 throw IOException("ЭБУ не отвечает на запросы данных. Включено ли зажигание? Ответ: ${r.ifBlank { "пусто" }}")
             }
+            addressed = true
             log("Блок двигателя отвечает только на адресные запросы (7E0)")
         }
         log("Протокол данных: $protocolName")

@@ -410,7 +410,10 @@ private fun DashboardScreen(vm: ObdSession, onDrive: () -> Unit) {
             Spacer(Modifier.weight(1f))
             RecordButton(rec != null, connState == ConnState.CONNECTED) { vm.toggleRecording() }
         }
-        LiveTripLine(vm)
+        Column(Modifier.padding(horizontal = 12.dp)) {
+            FuelCard(vm)
+            LiveTripLine(vm)
+        }
         MarksBar(vm, Modifier.padding(horizontal = 12.dp))
         Text(
             "Нажмите на плитку, чтобы добавить или убрать её из графиков",
@@ -559,6 +562,7 @@ private fun DriveScreen(vm: ObdSession, onExit: () -> Unit) {
                 Button(onClick = onExit) { Text("Выйти") }
             }
             LiveTripLine(vm, color = fg, big = true)
+            FuelLine(vm, color = fg, big = true)
             Spacer(Modifier.weight(1f))
             Text("Температура ОЖ", color = fg, fontSize = 18.sp)
             Text(
@@ -1320,6 +1324,19 @@ private fun TestsScreen(vm: ObdSession) {
                         OutlinedButton(onClick = {
                             vm.saveResearch()?.let { shareFile(ctx, it, null) }
                         }, enabled = research.isNotEmpty() && !researchBusy) { Text("Отправить") }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Поиск блоков: опрашивает коробку, ABS, руль, подушки, щиток, климат и дополнительные параметры двигателя. " +
+                            "Зажигание включено, двигатель можно не заводить. Занимает 3–6 минут, только чтение. Потом нажмите «Отправить».",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = {
+                            showResearch = true
+                            vm.scanModules()
+                        }, enabled = connected && !researchBusy) { Text("Поиск блоков") }
+                        OutlinedButton(onClick = { vm.cancelScan() }, enabled = researchBusy) { Text("Стоп") }
                     }
                     Spacer(Modifier.height(8.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {

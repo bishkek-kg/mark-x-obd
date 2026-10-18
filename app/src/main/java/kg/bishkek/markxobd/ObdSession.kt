@@ -364,7 +364,7 @@ class ObdSession private constructor(private val app: Application) {
                 false
             }
             if (tcmOk) {
-                keys.addAll(listOf(Pids.ATF_A, Pids.ATF_B))
+                keys.add(Pids.ATF_A)
                 supportedKeys.value = keys.toSet()
             }
             chargeMonitor.reset()
@@ -516,13 +516,11 @@ class ObdSession private constructor(private val app: Application) {
         raw("tB6", r["21B6"], 9)
         raw("tD9", r["21D9"], 8)
         raw("tE2", r["21E2"], 5)
-        r["21B4"]?.getOrNull(3)?.let {
+        // 21B4[2] — копия температуры воздуха, 21B4[3] и 21B6[4] — копии температуры ОЖ.
+        // 21D9[4] растёт медленнее ОЖ и не повторяет её — главный кандидат на температуру масла.
+        r["21D9"]?.getOrNull(4)?.let {
             map[Pids.ATF_A] = it - 40.0
             history.add(Pids.ATF_A, now, it - 40.0)
-        }
-        r["21B6"]?.getOrNull(4)?.let {
-            map[Pids.ATF_B] = it - 40.0
-            history.add(Pids.ATF_B, now, it - 40.0)
         }
         return true
     }

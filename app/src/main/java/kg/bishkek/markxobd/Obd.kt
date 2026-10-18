@@ -89,8 +89,7 @@ object Pids {
         (0 until 6).map { "tB4_$it" } + (0 until 9).map { "tB6_$it" } + (0 until 8).map { "tD9_$it" } + (0 until 5).map { "tE2_$it" }
 
     val DERIVED: List<PidDef> = listOf(
-        PidDef(ATF_A, -3, "АКПП темп.? (A)", "°C", 0, false) { null },
-        PidDef(ATF_B, -3, "АКПП темп.? (B)", "°C", 0, false) { null },
+        PidDef(ATF_A, -3, "Темп. масла АКПП (проверяется)", "°C", 0, false) { null },
         PidDef(FUEL_LH, -2, "Расход топлива", "л/ч", 1, false) { null },
         PidDef(FUEL_L100, -2, "Расход на 100 км", "л/100км", 1, false) { null },
     )

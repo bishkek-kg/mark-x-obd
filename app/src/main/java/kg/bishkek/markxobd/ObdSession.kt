@@ -92,6 +92,8 @@ class ObdSession private constructor(private val app: Application) {
     private var accelRun: AccelRun? = null
     private var lastRpmAlertAt = 0L
     private var lastPollAt = 0L
+    @Volatile
+    private var tcmOk = false
 
     private var transport: Transport? = null
     @Volatile
@@ -353,6 +355,18 @@ class ObdSession private constructor(private val app: Application) {
             supportedKeys.value = keys
             status.value = "Проверка ошибок…"
             checkNewDtcs(e)
+            status.value = "Проверка коробки передач…"
+            tcmOk = try {
+                pollTcm(e, HashMap(), System.currentTimeMillis())
+            } catch (c: CancellationException) {
+                throw c
+            } catch (_: Exception) {
+                false
+            }
+            if (tcmOk) {
+                keys.addAll(listOf(Pids.ATF_A, Pids.ATF_B))
+                supportedKeys.value = keys.toSet()
+            }
             chargeMonitor.reset()
             chargeLow.value = false
             engineOnSince = null
@@ -466,6 +480,12 @@ class ObdSession private constructor(private val app: Application) {
                     history.add(Pids.ADAPTER_V, System.currentTimeMillis(), av)
                 }
             }
+            if (tcmOk && !fast && !pollPaused && cycle % 10L == 5L) {
+                try {
+                    pollTcm(e, map, System.currentTimeMillis())
+                } catch (_: ElmTimeoutException) {
+                }
+            }
             val now = System.currentTimeMillis()
             updateDerived(now, map)
             values.value = map
@@ -480,6 +500,31 @@ class ObdSession private constructor(private val app: Application) {
             historyTick.value = now
             cycle++
         }
+    }
+
+    /** Опрос АКПП: два кандидата на температуру масла и сырые байты для расшифровки. */
+    private suspend fun pollTcm(e: Elm327, map: HashMap<String, Double>, now: Long): Boolean {
+        val r = e.queryModule("7E1", listOf("21B4", "21B6", "21D9", "21E2"))
+        if (r.isEmpty()) return false
+        fun raw(prefix: String, bytes: List<Int>?, n: Int) {
+            for (i in 0 until n) {
+                val b = bytes?.getOrNull(i) ?: continue
+                map["${prefix}_$i"] = b.toDouble()
+            }
+        }
+        raw("tB4", r["21B4"], 6)
+        raw("tB6", r["21B6"], 9)
+        raw("tD9", r["21D9"], 8)
+        raw("tE2", r["21E2"], 5)
+        r["21B4"]?.getOrNull(3)?.let {
+            map[Pids.ATF_A] = it - 40.0
+            history.add(Pids.ATF_A, now, it - 40.0)
+        }
+        r["21B6"]?.getOrNull(4)?.let {
+            map[Pids.ATF_B] = it - 40.0
+            history.add(Pids.ATF_B, now, it - 40.0)
+        }
+        return true
     }
 
     /** Расход топлива по MAF и счётчики текущей поездки. */
@@ -1069,7 +1114,8 @@ class ObdSession private constructor(private val app: Application) {
         autoStartedRecording = false
         chargeMonitor.reset()
         val useGps = gpsOn.value && gps.hasPermission()
-        val keys = Pids.DISPLAY.map { it.key } + (if (useGps) listOf("lat", "lon") else emptyList())
+        val keys = Pids.DISPLAY.map { it.key } + (if (useGps) listOf("lat", "lon") else emptyList()) +
+            (if (tcmOk) Pids.TCM_RAW_KEYS else emptyList())
         val l = CsvLogger(logsDir(), keys)
         logger = l
         recordingFile.value = l.file

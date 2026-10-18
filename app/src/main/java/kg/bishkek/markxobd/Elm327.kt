@@ -232,6 +232,29 @@ class Elm327(private val t: Transport, private val log: (String) -> Unit) {
         return out.ifEmpty { null }
     }
 
+    /**
+     * Запросы Mode 21 к другому блоку (например, АКПП 7E1). Возвращает байты данных после «61 xx»
+     * для каждого ответившего запроса и восстанавливает рабочий заголовок.
+     */
+    suspend fun queryModule(header: String, cmds: List<String>): Map<String, List<Int>> {
+        val out = HashMap<String, List<Int>>()
+        try {
+            send("ATSH$header", 1000)
+            for (cmd in cmds) {
+                val r = try { send(cmd, 1500) } catch (_: ElmTimeoutException) { continue }
+                val hex = joinFrames(r)
+                val marker = "6" + cmd.substring(1)
+                var idx = hex.indexOf(marker)
+                while (idx >= 0 && idx % 2 != 0) idx = hex.indexOf(marker, idx + 1)
+                if (idx < 0) continue
+                out[cmd] = Pids.hexBytes(hex.substring(idx + marker.length)).toList()
+            }
+        } finally {
+            try { send(if (addressed) "ATSH7E0" else "ATSH7DF", 1000) } catch (_: ElmTimeoutException) {}
+        }
+        return out
+    }
+
     /** Склеивает многокадровый ответ CAN в одну hex-строку без номеров кадров. */
     private fun joinFrames(r: String): String {
         val sb = StringBuilder()

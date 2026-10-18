@@ -82,7 +82,15 @@ object Pids {
     val ADAPTER = PidDef(ADAPTER_V, -1, "Напряжение адаптера", "В", 1, false) { null }
 
     /** Расчётные параметры: не опрашиваются, считаются из других (pid = -2). */
+    /** АКПП A760E (блок 7E1): кандидаты на температуру масла — какой верный, покажут записи с холодного пуска. */
+    const val ATF_A = "atfA"
+    const val ATF_B = "atfB"
+    val TCM_RAW_KEYS: List<String> =
+        (0 until 6).map { "tB4_$it" } + (0 until 9).map { "tB6_$it" } + (0 until 8).map { "tD9_$it" } + (0 until 5).map { "tE2_$it" }
+
     val DERIVED: List<PidDef> = listOf(
+        PidDef(ATF_A, -3, "АКПП темп.? (A)", "°C", 0, false) { null },
+        PidDef(ATF_B, -3, "АКПП темп.? (B)", "°C", 0, false) { null },
         PidDef(FUEL_LH, -2, "Расход топлива", "л/ч", 1, false) { null },
         PidDef(FUEL_L100, -2, "Расход на 100 км", "л/100км", 1, false) { null },
     )

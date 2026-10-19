@@ -407,6 +407,8 @@ private fun DashboardScreen(vm: ObdSession, onDrive: () -> Unit) {
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Button(onClick = onDrive) { Text("Режим «В дороге»") }
+            Spacer(Modifier.width(8.dp))
+            AccelQuickButton(vm)
             Spacer(Modifier.weight(1f))
             RecordButton(rec != null, connState == ConnState.CONNECTED) { vm.toggleRecording() }
         }
@@ -563,6 +565,7 @@ private fun DriveScreen(vm: ObdSession, onExit: () -> Unit) {
             }
             LiveTripLine(vm, color = fg, big = true)
             FuelLine(vm, color = fg, big = true)
+            AccelLine(vm, color = fg)
             Spacer(Modifier.weight(1f))
             Text("Температура ОЖ", color = fg, fontSize = 18.sp)
             Text(

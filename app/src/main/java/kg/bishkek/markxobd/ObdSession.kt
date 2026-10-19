@@ -599,8 +599,10 @@ class ObdSession private constructor(private val app: Application) {
 
         // ---- Замер разгона ----
         accelRun?.let { run ->
+            val prev = accel.value?.phase
             val st = run.feed(now, map["speed"])
             accel.value = st
+            if (st.phase == AccelPhase.READY && prev != AccelPhase.READY) alert("Замер разгона готов. Можно разгоняться", urgent = false)
             if (st.phase == AccelPhase.DONE) {
                 accelRun = null
                 run.result(now)?.let { saveAccel(it) }
@@ -796,7 +798,9 @@ class ObdSession private constructor(private val app: Application) {
         }
         val run = AccelRun()
         accelRun = run
-        accel.value = run.feed(System.currentTimeMillis(), values.value["speed"])
+        val st = run.feed(System.currentTimeMillis(), values.value["speed"])
+        accel.value = st
+        alert(if (st.phase == AccelPhase.READY) "Замер разгона готов. Можно разгоняться" else "Замер разгона. Остановитесь полностью", urgent = false)
     }
 
     fun cancelAccel() {

@@ -508,3 +508,29 @@ private fun RefuelDialog(vm: ObdSession, t: FuelTank, onClose: () -> Unit) {
         dismissButton = { TextButton(onClick = onClose) { Text("Отмена") } },
     )
 }
+
+
+// ---------------- Быстрый запуск замера разгона ----------------
+
+@Composable
+fun AccelQuickButton(vm: ObdSession) {
+    val st by vm.accel.collectAsState()
+    val conn by vm.connState.collectAsState()
+    val active = st != null && st!!.phase != AccelPhase.DONE
+    OutlinedButton(
+        onClick = { if (active) vm.cancelAccel() else vm.startAccel() },
+        enabled = conn == ConnState.CONNECTED,
+    ) { Text(if (active) "Отмена разгона" else "0–100") }
+}
+
+@Composable
+fun AccelLine(vm: ObdSession, color: Color = Color.Unspecified) {
+    val st by vm.accel.collectAsState()
+    val s = st ?: return
+    val tail = when (s.phase) {
+        AccelPhase.RUNNING -> " · ${n1(s.elapsed)} с"
+        AccelPhase.DONE -> " · 0–60 ${secs(s.t60)} · 0–100 ${secs(s.t100)}"
+        else -> ""
+    }
+    Text("Разгон: ${s.message}$tail", color = color, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+}

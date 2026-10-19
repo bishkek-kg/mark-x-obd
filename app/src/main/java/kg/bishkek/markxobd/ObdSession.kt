@@ -91,6 +91,7 @@ class ObdSession private constructor(private val app: Application) {
     @Volatile
     private var accelRun: AccelRun? = null
     private var lastRpmAlertAt = 0L
+    private var lastAtfAlertAt = 0L
     private var lastPollAt = 0L
     @Volatile
     private var tcmOk = false
@@ -580,6 +581,13 @@ class ObdSession private constructor(private val app: Application) {
                 alert("Температура ${coolant.toInt()} градусов.", urgent = false)
             }
             if (coolant < Thresholds.warn - 3) warned100 = false
+        }
+
+        // ---- Масло АКПП (A760E: норма 70–95 °C, выше 115 — перегрев) ----
+        val atf = map[Pids.ATF_A]
+        if (atf != null && atf >= 115 && now - lastAtfAlertAt > 60_000) {
+            lastAtfAlertAt = now
+            alert("Перегрев масла коробки, ${atf.toInt()} градусов. Снизьте нагрузку.", urgent = atf >= 125)
         }
 
         // ---- Обороты ----

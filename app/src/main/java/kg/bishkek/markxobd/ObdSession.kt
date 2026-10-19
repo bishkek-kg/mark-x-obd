@@ -663,7 +663,8 @@ class ObdSession private constructor(private val app: Application) {
         prefs.edit().putString("knownDtcs", current.joinToString(",")).apply()
         // при самом первом подключении сравнивать не с чем
         if (known == null) return
-        val fresh = (current - known).sorted()
+        // коды лямбда-зондов не озвучиваем: зонды на этой машине отключены
+        val fresh = (current - known).filterNot { Dtc.isOxygenSensor(it) }.sorted()
         if (fresh.isEmpty()) return
         newDtc.value = fresh
         addMarkInternal(now, "Новая ошибка: ${fresh.joinToString(" ")}", values.value["coolant"])

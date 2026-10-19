@@ -151,6 +151,16 @@ data class FanEvent(val time: Long, val coolant: Double?, val drop: Double)
 data class DeviceItem(val name: String, val address: String, val ble: Boolean)
 
 object Dtc {
+    /**
+     * Коды лямбда-зондов и их подогрева: P0030–P0064, P0130–P0167, P2195–P2199, P2237–P2253.
+     * На этой машине зонды отключены, поэтому такие коды ожидаемы и о них не предупреждаем.
+     */
+    fun isOxygenSensor(code: String): Boolean {
+        if (code.length != 5 || code[0] != 'P') return false
+        val n = code.substring(1).toIntOrNull(16) ?: return false
+        return n in 0x0030..0x0064 || n in 0x0130..0x0167 || n in 0x2195..0x2199 || n in 0x2237..0x2253
+    }
+
     fun decode(a: Int, b: Int): String {
         val letter = "PCBU"[(a shr 6) and 3]
         val d1 = (a shr 4) and 3
